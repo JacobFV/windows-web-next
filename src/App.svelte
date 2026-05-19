@@ -23,6 +23,7 @@
 	import Store from './components/apps/Store.svelte';
 	import SnippingTool from './components/apps/SnippingTool.svelte';
 	import WordPad from './components/apps/WordPad.svelte';
+	import Word from './components/apps/Word.svelte';
 	import DiskCleanup from './components/apps/DiskCleanup.svelte';
 	import { wm, appConfigs, type AppID } from './state/windows.svelte.ts';
 	import { preferences, applyPreferences } from './state/preferences.svelte';
@@ -57,6 +58,7 @@
 		store: Store,
 		'snipping-tool': SnippingTool,
 		wordpad: WordPad,
+		word: Word,
 		'disk-cleanup': DiskCleanup,
 	};
 

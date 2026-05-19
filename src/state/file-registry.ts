@@ -40,7 +40,9 @@ const registry: Record<string, FileTypeInfo> = {
 
 	// Documents → Edge (as viewer)
 	'.pdf': { appId: 'edge', typeLabel: 'PDF Document', icon: '📕' },
-	'.docx': { appId: 'edge', typeLabel: 'Microsoft Word', icon: '📝' },
+	'.docx': { appId: 'word', typeLabel: 'Microsoft Word', icon: '📝' },
+	'.doc': { appId: 'word', typeLabel: 'Microsoft Word', icon: '📝' },
+	'.rtf': { appId: 'word', typeLabel: 'Rich Text Document', icon: '📝' },
 	'.xlsx': { appId: 'edge', typeLabel: 'Microsoft Excel', icon: '📊' },
 	'.pptx': { appId: 'edge', typeLabel: 'Microsoft PowerPoint', icon: '📊' },
 

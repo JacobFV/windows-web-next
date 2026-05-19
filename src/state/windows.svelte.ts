@@ -20,6 +20,7 @@ export type AppID =
 	| 'store'
 	| 'snipping-tool'
 	| 'wordpad'
+	| 'word'
 	| 'disk-cleanup';
 
 export interface WindowState {
@@ -246,6 +247,16 @@ export const appConfigs: Record<AppID, AppConfig> = {
 		defaultHeight: 600,
 		minWidth: 400,
 		minHeight: 300,
+		pinned: false,
+	},
+	word: {
+		id: 'word',
+		title: 'Word',
+		icon: '📝',
+		defaultWidth: 1100,
+		defaultHeight: 720,
+		minWidth: 700,
+		minHeight: 500,
 		pinned: false,
 	},
 	'disk-cleanup': {
