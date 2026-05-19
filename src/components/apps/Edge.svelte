@@ -8,7 +8,7 @@
 		url: string;
 		title: string;
 		favicon: string;
-		contentType: 'newtab' | 'search' | 'page' | 'settings';
+		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
 	}
 
 	interface Tab {
@@ -16,12 +16,52 @@
 		title: string;
 		url: string;
 		favicon: string;
-		contentType: 'newtab' | 'search' | 'page' | 'settings';
+		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
 		searchQuery: string;
 		historyStack: HistoryEntry[];
 		historyIndex: number;
 		pageContent: { title: string; domain: string; body: string } | null;
+		// Per-tab proxy session. Cookies in the jar (server-side) are scoped
+		// to this id, so closing a tab effectively logs out of any sites
+		// browsed in it. Generated once on tab creation.
+		sessionId: string;
+		// The currently displayed proxied URL (the target, NOT the
+		// /api/proxy?url=... wrapper). Used as the iframe src input.
+		proxyTarget: string | null;
+		// Tracks whether the SSE channel for this tab has reported a hard
+		// error (e.g. the /api/session endpoint is unreachable). The UI
+		// downgrades to a non-interactive status indicator when true.
+		proxyStreamError: boolean;
 	}
+
+	// WHY postMessage origin '*': the iframe document is served from the same
+	// origin as the parent (both come from /api/proxy on our deployment), so
+	// the browser already considers them same-origin. But during local dev the
+	// iframe sees `http://localhost:5173` while messages may originate from
+	// the proxied content's <base href>; '*' avoids the false-negative drop
+	// while we filter on { __edge: true } in the listener.
+
+	// Generate a stable-ish session id. WHY crypto.randomUUID with fallback:
+	// older browsers / non-secure contexts don't expose it.
+	function newSessionId(): string {
+		try {
+			if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+				return (crypto as any).randomUUID();
+			}
+		} catch {
+			/* fallthrough */
+		}
+		return 'sess-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+	}
+
+	function buildProxyUrl(target: string, sessionId: string): string {
+		return `/api/proxy?url=${encodeURIComponent(target)}&session=${encodeURIComponent(sessionId)}`;
+	}
+
+	// Map of tab id -> EventSource. Kept outside reactive state because
+	// EventSource is non-serialisable and Svelte deep-proxying it causes
+	// "Illegal invocation" errors on its native methods.
+	const tabStreams: Map<number, EventSource> = new Map();
 
 	let tabs = $state<Tab[]>([
 		{
@@ -34,6 +74,9 @@
 			historyStack: [{ url: 'edge://newtab', title: 'New Tab', favicon: '🏠', contentType: 'newtab' }],
 			historyIndex: 0,
 			pageContent: null,
+			sessionId: newSessionId(),
+			proxyTarget: null,
+			proxyStreamError: false,
 		},
 	]);
 	let activeTabId = $state(1);
@@ -66,7 +109,106 @@
 			],
 			historyIndex: 0,
 			pageContent: null,
+			sessionId: newSessionId(),
+			proxyTarget: null,
+			proxyStreamError: false,
 		};
+	}
+
+	// WHY a single shared message listener (not one per iframe): the iframe
+	// only exposes its source via the MessageEvent, and we look up the right
+	// tab by iterating. Adding/removing listeners on every src change leaks
+	// handlers and races. Installed once on mount, removed on unmount.
+	function handleIframeMessage(e: MessageEvent) {
+		const data = e.data;
+		if (!data || typeof data !== 'object' || (data as any).__edge !== true) return;
+		// Find the tab whose iframe sent this. We can't trust e.source across
+		// reloads (the contentWindow reference changes), so we apply the
+		// event to the *active* tab — which is the only one the user could
+		// have been interacting with.
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab || tab.contentType !== 'proxy') return;
+
+		if ((data as any).type === 'nav' && typeof (data as any).url === 'string') {
+			// Soft URL update — don't push a history entry for every pushState,
+			// just reflect the new URL in the address bar.
+			tab.url = (data as any).url;
+			tab.proxyTarget = (data as any).url;
+			if (activeTabId === tab.id) addressValue = tab.url;
+			tabs = tabs;
+		} else if ((data as any).type === 'loaded') {
+			if (typeof (data as any).title === 'string' && (data as any).title) {
+				tab.title = (data as any).title;
+				tabs = tabs;
+			}
+		} else if ((data as any).type === 'error') {
+			// Non-fatal — runtime JS errors inside the proxied page. We log
+			// but don't surface, otherwise every site spams the status bar.
+			// console.debug('[edge proxy] page error:', data);
+		}
+	}
+
+	// WHY tear-down on tab close (not just on unmount): each EventSource keeps
+	// an open HTTP/2 stream against /api/session. Leaving them open after a
+	// tab closes wastes server-side function-invocation budget and triggers
+	// browser connection-limit throttling after ~6 tabs.
+	function openSessionStream(tab: Tab) {
+		closeSessionStream(tab.id);
+		let es: EventSource;
+		try {
+			es = new EventSource(`/api/session?session=${encodeURIComponent(tab.sessionId)}`);
+		} catch {
+			tab.proxyStreamError = true;
+			return;
+		}
+		// Generic listeners. EventSource fires 'message' for events without an
+		// explicit `event:` field and named events for the rest.
+		es.addEventListener('open', () => {
+			tab.proxyStreamError = false;
+			tabs = tabs;
+		});
+		es.addEventListener('cookie', () => {
+			// Could surface a "cookies set" indicator if desired.
+		});
+		es.addEventListener('redirect', () => {
+			// The iframe will follow the 302 itself; nothing to do here.
+		});
+		es.addEventListener('error', () => {
+			// EventSource fires 'error' both for transient blips (it
+			// auto-reconnects) and for fatal closes (readyState === CLOSED).
+			// Only flag the latter.
+			if (es.readyState === EventSource.CLOSED) {
+				tab.proxyStreamError = true;
+				tabs = tabs;
+			}
+		});
+		tabStreams.set(tab.id, es);
+	}
+
+	function closeSessionStream(tabId: number) {
+		const es = tabStreams.get(tabId);
+		if (es) {
+			try { es.close(); } catch { /* noop */ }
+			tabStreams.delete(tabId);
+		}
+	}
+
+	function refreshProxySession() {
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		// Fire-and-forget DELETE — the proxy clears its in-memory jar for
+		// this session id. If it fails (e.g. offline) we still rotate the
+		// session id below, which has the same client-visible effect.
+		fetch(`/api/proxy?session=${encodeURIComponent(tab.sessionId)}`, { method: 'DELETE' }).catch(() => {});
+		closeSessionStream(tab.id);
+		tab.sessionId = newSessionId();
+		tab.proxyStreamError = false;
+		openSessionStream(tab);
+		if (tab.contentType === 'proxy' && tab.proxyTarget) {
+			// Force-reload the iframe at the new session id.
+			refresh();
+		}
+		tabs = tabs;
 	}
 
 	function addTab() {
@@ -77,10 +219,14 @@
 		addressValue = '';
 		showCollections = false;
 		showSettingsMenu = false;
+		// Open the SSE session for this tab eagerly so cookie/nav events from
+		// the very first proxy fetch are already wired up.
+		openSessionStream(newTab);
 	}
 
 	function closeTab(id: number) {
 		if (tabs.length === 1) return;
+		closeSessionStream(id);
 		const idx = tabs.findIndex((t) => t.id === id);
 		tabs = tabs.filter((t) => t.id !== id);
 		if (activeTabId === id) {
@@ -222,6 +368,18 @@
 		tabs = tabs;
 	}
 
+	function navigateProxy(tab: Tab, target: string) {
+		tab.proxyTarget = target;
+		simulateLoading(() => {
+			navigateTab(
+				tab,
+				{ url: target, title: getDomain(target), favicon: '🌐', contentType: 'proxy' },
+				null,
+			);
+			addressValue = target;
+		});
+	}
+
 	function handleNavigate() {
 		const input = addressValue.trim();
 		if (!input) return;
@@ -231,27 +389,17 @@
 		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab) return;
 
+		// WHY route both URLs AND search through the proxy: real internet.
+		// Non-URL queries get rewritten into a real DuckDuckGo HTML search —
+		// DDG's `html.duckduckgo.com` endpoint returns server-rendered HTML
+		// that survives our proxy rewriter, unlike Google/Bing which require
+		// JS execution + lots of CSP-protected resources.
 		if (isUrl(input)) {
 			const url = input.startsWith('http') ? input : 'https://' + input;
-			const pageContent = getFakePageContent(url);
-			simulateLoading(() => {
-				navigateTab(
-					tab,
-					{ url, title: pageContent.title, favicon: '🌐', contentType: 'page' },
-					pageContent
-				);
-				addressValue = url;
-			});
+			navigateProxy(tab, url);
 		} else {
-			simulateLoading(() => {
-				navigateTab(
-					tab,
-					{ url: `bing.com/search?q=${encodeURIComponent(input)}`, title: `${input} - Bing`, favicon: '🔍', contentType: 'search' },
-					null,
-					input
-				);
-				addressValue = `bing.com/search?q=${encodeURIComponent(input)}`;
-			});
+			const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(input)}`;
+			navigateProxy(tab, searchUrl);
 		}
 	}
 
@@ -268,16 +416,7 @@
 		addressValue = url;
 		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab) return;
-
-		const pageContent = getFakePageContent(url);
-		simulateLoading(() => {
-			navigateTab(
-				tab,
-				{ url, title: pageContent.title, favicon: '🌐', contentType: 'page' },
-				pageContent
-			);
-			addressValue = url;
-		});
+		navigateProxy(tab, url);
 	}
 
 	function handleSearchResultClick(url: string) {
@@ -285,16 +424,7 @@
 		addressValue = fullUrl;
 		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab) return;
-
-		const pageContent = getFakePageContent(fullUrl);
-		simulateLoading(() => {
-			navigateTab(
-				tab,
-				{ url: fullUrl, title: pageContent.title, favicon: '🌐', contentType: 'page' },
-				pageContent
-			);
-			addressValue = fullUrl;
-		});
+		navigateProxy(tab, fullUrl);
 	}
 
 	function goBack() {
@@ -308,6 +438,7 @@
 		tab.contentType = entry.contentType;
 		tab.searchQuery = '';
 		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
+		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
 		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
 	}
@@ -323,14 +454,19 @@
 		tab.contentType = entry.contentType;
 		tab.searchQuery = '';
 		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
+		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
 		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
 	}
 
+	// WHY a nonce on the iframe URL during refresh: the browser otherwise
+	// serves the iframe from cache and you get an apparent no-op. Toggling
+	// the nonce changes the src and forces a reload.
+	let iframeNonce = $state(0);
 	function refresh() {
 		if (!activeTab) return;
+		iframeNonce++;
 		simulateLoading(() => {
-			// Just re-render current state
 			tabs = tabs;
 		});
 	}
@@ -367,6 +503,7 @@
 		{ label: 'Downloads', icon: '⬇️', action: () => {} },
 		{ label: 'Extensions', icon: '🧩', action: () => {} },
 		{ separator: true, label: '', icon: '', action: () => {} },
+		{ label: 'Refresh proxy session', icon: '🔄', action: refreshProxySession },
 		{ label: 'Settings', icon: '⚙️', action: openSettings },
 	];
 
@@ -446,7 +583,16 @@
 			}
 		}
 		document.addEventListener('click', handleClickOutside);
-		return () => document.removeEventListener('click', handleClickOutside);
+		window.addEventListener('message', handleIframeMessage);
+
+		// Open SSE streams for any pre-existing tabs (initial tab in $state).
+		for (const t of tabs) openSessionStream(t);
+
+		return () => {
+			document.removeEventListener('click', handleClickOutside);
+			window.removeEventListener('message', handleIframeMessage);
+			for (const id of Array.from(tabStreams.keys())) closeSessionStream(id);
+		};
 	});
 </script>
 
@@ -736,6 +882,34 @@
 					</div>
 				</div>
 			</div>
+		{:else if activeTab?.contentType === 'proxy' && activeTab.proxyTarget}
+			<!--
+				WHY the iframe src includes iframeNonce only in a hash fragment:
+				we want the proxy URL to remain stable for caching/sharing, but
+				we need a way to force the iframe to reload on user click of
+				Refresh. The hash is ignored by the server router but Chrome
+				treats a different src as a reload.
+
+				WHY sandbox is permissive (allow-scripts, allow-forms, etc):
+				most real sites are unusable without scripts, forms, popups.
+				We accept the security trade-off because the proxied content
+				is already same-origin from the browser's POV (served via
+				/api/proxy on our domain) — sandbox is a defense-in-depth
+				layer, not a primary boundary.
+			-->
+			<iframe
+				class="proxy-frame"
+				title="Proxied content"
+				src={buildProxyUrl(activeTab.proxyTarget, activeTab.sessionId) + '#n=' + iframeNonce}
+				sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+				referrerpolicy="no-referrer"
+			></iframe>
+			{#if activeTab.proxyStreamError}
+				<div class="proxy-status-warn">
+					Session channel disconnected. The page will still load, but cookie / nav events
+					may be missed. Try "Refresh proxy session" from the menu.
+				</div>
+			{/if}
 		{:else if activeTab?.contentType === 'settings'}
 			<div class="settings-page">
 				<div class="settings-sidebar">
