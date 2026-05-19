@@ -51,6 +51,7 @@
 
 	let allAppsView = $state(false);
 	let powerMenuOpen = $state(false);
+	let userMenuOpen = $state(false);
 
 	function openApp(id: AppID) {
 		wm.openApp(id);
@@ -66,10 +67,27 @@
 
 	function togglePowerMenu() {
 		powerMenuOpen = !powerMenuOpen;
+		userMenuOpen = false;
 	}
 
 	function handlePowerOption() {
 		powerMenuOpen = false;
+		wm.closeStartMenu();
+	}
+
+	function toggleUserMenu() {
+		userMenuOpen = !userMenuOpen;
+		powerMenuOpen = false;
+	}
+
+	function handleUserOption(action: 'settings' | 'lock' | 'signout') {
+		userMenuOpen = false;
+		if (action === 'settings') {
+			wm.openApp('settings');
+		} else if (action === 'lock' || action === 'signout') {
+			wm.locked = true;
+			if (action === 'signout') wm.activeApp = null;
+		}
 		wm.closeStartMenu();
 	}
 
@@ -127,13 +145,15 @@
 				</button>
 			</div>
 
-			<div class="pinned-grid">
-				{#each pinnedApps as app (app.id)}
-					<button class="pinned-item" onclick={() => openApp(app.id)}>
-						<span class="pinned-icon">{app.icon}</span>
-						<span class="pinned-label">{app.label}</span>
-					</button>
-				{/each}
+			<div class="pinned-section">
+				<div class="pinned-grid">
+					{#each pinnedApps as app (app.id)}
+						<button class="pinned-item" onclick={() => openApp(app.id)}>
+							<span class="pinned-icon">{app.icon}</span>
+							<span class="pinned-label">{app.label}</span>
+						</button>
+					{/each}
+				</div>
 			</div>
 
 			<!-- Recommended section -->
@@ -157,14 +177,40 @@
 
 		<!-- Bottom bar: user + power -->
 		<div class="bottom-bar">
-			<button class="user-btn">
-				<div class="user-avatar">
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="rgba(0,0,0,0.6)">
-						<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-					</svg>
-				</div>
-				<span class="user-name">User</span>
-			</button>
+			<div class="user-wrapper">
+				{#if userMenuOpen}
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div class="user-dropdown">
+						<button class="power-option" onclick={() => handleUserOption('settings')}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+								<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+							</svg>
+							<span>Change account settings</span>
+						</button>
+						<button class="power-option" onclick={() => handleUserOption('lock')}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+								<path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/>
+							</svg>
+							<span>Lock</span>
+						</button>
+						<button class="power-option" onclick={() => handleUserOption('signout')}>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+								<path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/>
+							</svg>
+							<span>Sign out</span>
+						</button>
+					</div>
+				{/if}
+				<button class="user-btn" aria-label="User account" onclick={toggleUserMenu}>
+					<div class="user-avatar">
+						<svg width="20" height="20" viewBox="0 0 24 24" fill="rgba(0,0,0,0.6)">
+							<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+						</svg>
+					</div>
+					<span class="user-name">User</span>
+				</button>
+			</div>
 
 			<div class="power-wrapper">
 				{#if powerMenuOpen}
@@ -300,13 +346,20 @@
 		background: rgba(0, 0, 0, 0.04);
 	}
 
+	.pinned-section {
+		margin: 8px 20px 12px;
+		padding: 12px;
+		background: rgba(255, 255, 255, 0.5);
+		border: 1px solid rgba(0, 0, 0, 0.04);
+		border-radius: var(--win-radius-md);
+		max-height: 260px;
+		overflow-y: auto;
+	}
+
 	.pinned-grid {
 		display: grid;
 		grid-template-columns: repeat(5, 1fr);
-		gap: 2px;
-		padding: 8px 20px 16px;
-		max-height: 260px;
-		overflow-y: auto;
+		gap: 8px;
 	}
 
 	.pinned-item {
@@ -461,8 +514,24 @@
 		color: var(--win-text-primary);
 	}
 
-	.power-wrapper {
+	.power-wrapper, .user-wrapper {
 		position: relative;
+	}
+
+	.user-dropdown {
+		position: absolute;
+		bottom: calc(100% + 6px);
+		left: 0;
+		min-width: 220px;
+		background: rgba(252, 252, 252, 0.96);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: var(--win-radius-md);
+		box-shadow: var(--win-shadow-flyout);
+		padding: 4px;
+		z-index: 10;
+		animation: powerDropdownFadeIn 0.12s ease-out;
 	}
 
 	.power-btn {

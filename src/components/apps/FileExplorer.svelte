@@ -1057,6 +1057,7 @@
 		flex: 1;
 		overflow: auto;
 		background: white;
+		container-type: inline-size;
 	}
 
 	/* Empty folder */
@@ -1123,6 +1124,36 @@
 		color: var(--win-text-primary);
 		cursor: default;
 		transition: background-color 0.06s ease;
+	}
+
+	@container (max-width: 720px) {
+		.list-header,
+		.file-row {
+			grid-template-columns: 1fr 180px 140px;
+		}
+		.col-size {
+			display: none;
+		}
+	}
+
+	@container (max-width: 560px) {
+		.list-header,
+		.file-row {
+			grid-template-columns: 1fr 180px;
+		}
+		.col-type {
+			display: none;
+		}
+	}
+
+	@container (max-width: 420px) {
+		.list-header,
+		.file-row {
+			grid-template-columns: 1fr;
+		}
+		.col-date {
+			display: none;
+		}
 	}
 
 	.file-row:hover {

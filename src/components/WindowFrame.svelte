@@ -513,6 +513,10 @@
 		background: rgba(0, 0, 0, 0.04);
 	}
 
+	.close-btn {
+		border-top-right-radius: var(--win-radius-md);
+	}
+
 	.close-btn:hover {
 		background: #C42B1C;
 		color: white;
@@ -521,6 +525,10 @@
 	.close-btn:active {
 		background: rgba(196, 43, 28, 0.85);
 		color: white;
+	}
+
+	.window-frame.maximized .close-btn {
+		border-top-right-radius: 0;
 	}
 
 	/* Maximize button wrapper for snap layout flyout */
