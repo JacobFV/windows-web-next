@@ -223,10 +223,10 @@ function deproxify(reqUrl: URL): { target: string | null; sessionId: string } {
 
 	// Forward all upstream query params (everything except our __s/session).
 	const upstream = new URLSearchParams();
-	for (const [k, v] of reqUrl.searchParams) {
-		if (k === '__s' || k === 'session') continue;
+	reqUrl.searchParams.forEach((v, k) => {
+		if (k === '__s' || k === 'session') return;
 		upstream.append(k, v);
-	}
+	});
 	const qs = upstream.toString();
 	return {
 		target: `${scheme}://${host}${pathname}${qs ? '?' + qs : ''}`,
