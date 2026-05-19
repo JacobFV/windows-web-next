@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { preferences, applyPreferences } from '../../state/preferences.svelte';
+	import { preferences, applyPreferences, resetPreferences } from '../../state/preferences.svelte';
+	import { clearWindowManagerStorage } from '../../state/windows.svelte.ts';
 
 	interface SettingsCategory {
 		id: string;
@@ -371,6 +372,26 @@
 			updateCheckDone = true;
 		}, 2000);
 	}
+
+	// "Reset to defaults" — inline confirmation prompt (no native confirm()).
+	let resetConfirming = $state(false);
+
+	function handleResetClick() {
+		resetConfirming = true;
+	}
+
+	function handleResetCancel() {
+		resetConfirming = false;
+	}
+
+	function handleResetConfirm() {
+		resetPreferences();
+		clearWindowManagerStorage();
+		applyPreferences();
+		setTimeout(() => {
+			location.reload();
+		}, 100);
+	}
 </script>
 
 <div class="settings-app">
@@ -496,6 +517,24 @@
 				</div>
 			{/if}
 		</div>
+
+		{#if activeCategory === 'system'}
+			<div class="reset-card">
+				<div class="reset-info">
+					<span class="reset-title">Reset to defaults</span>
+					<span class="reset-desc">Clear all saved preferences, desktop layout, and window positions, then reload.</span>
+				</div>
+				<div class="reset-actions">
+					{#if !resetConfirming}
+						<button class="reset-button" onclick={handleResetClick}>Reset</button>
+					{:else}
+						<span class="reset-confirm-text">Are you sure?</span>
+						<button class="reset-button danger" onclick={handleResetConfirm}>Yes, reset</button>
+						<button class="reset-button" onclick={handleResetCancel}>No</button>
+					{/if}
+				</div>
+			</div>
+		{/if}
 
 		<div class="settings-list">
 			{#each currentSettings as setting, si (setting.label + '-' + activeCategory + '-' + si)}
@@ -1081,5 +1120,74 @@
 
 	.info-item {
 		cursor: default;
+	}
+
+	/* Reset-to-defaults card */
+	.reset-card {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		padding: 14px 16px;
+		margin-bottom: 12px;
+		background: var(--win-bg-card-default);
+		border-radius: var(--win-radius-md);
+		border: 1px solid rgba(0, 0, 0, 0.04);
+	}
+
+	.reset-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+		flex: 1;
+	}
+
+	.reset-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+	}
+
+	.reset-desc {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.reset-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
+	.reset-confirm-text {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.reset-button {
+		padding: 6px 14px;
+		background: rgba(0, 0, 0, 0.05);
+		color: var(--win-text-primary);
+		border: 1px solid rgba(0, 0, 0, 0.1);
+		border-radius: var(--win-radius-sm);
+		font-size: 13px;
+		cursor: pointer;
+		transition: background-color 0.1s ease;
+	}
+
+	.reset-button:hover {
+		background: rgba(0, 0, 0, 0.08);
+	}
+
+	.reset-button.danger {
+		background: #c42b1c;
+		border-color: #c42b1c;
+		color: white;
+	}
+
+	.reset-button.danger:hover {
+		filter: brightness(1.1);
 	}
 </style>
