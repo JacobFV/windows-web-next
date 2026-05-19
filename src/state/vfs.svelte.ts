@@ -170,7 +170,25 @@ function createDefaultFS(): Map<string, FSNode> {
 						undefined,
 						new Date(2025, 1, 1, 14, 0),
 					)],
-					['Budget 2025.xlsx', file('Budget 2025.xlsx', '', 159744, new Date(2025, 1, 2, 11, 30))],
+					['Budget 2025.xlsx', file('Budget 2025.xlsx', JSON.stringify({
+						version: 1,
+						activeSheet: 0,
+						sheets: [{
+							name: 'Budget',
+							cols: {},
+							rows: {},
+							cells: {
+								'A1': { raw: 'Item', style: { bold: true } },
+								'B1': { raw: 'Amount', style: { bold: true, align: 'right' } },
+								'A2': { raw: 'Rent' },
+								'B2': { raw: '1200', style: { format: 'currency', align: 'right' } },
+								'A3': { raw: 'Groceries' },
+								'B3': { raw: '450', style: { format: 'currency', align: 'right' } },
+								'A4': { raw: 'Total', style: { bold: true } },
+								'B4': { raw: '=SUM(B2:B3)', style: { bold: true, format: 'currency', align: 'right' } },
+							},
+						}],
+					}), 159744, new Date(2025, 1, 2, 11, 30))],
 					['Report.pdf', file('Report.pdf', '', 2411724, new Date(2025, 0, 30, 13, 45))],
 					['readme.txt', file(
 						'readme.txt',
