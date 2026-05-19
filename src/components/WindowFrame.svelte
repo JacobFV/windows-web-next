@@ -16,21 +16,10 @@
 	let dragOffsetX = $state(0);
 	let dragOffsetY = $state(0);
 
-	// Edge resize state
-	let resizing = $state(false);
-	let resizeEdge = $state('');
-	let resizeStartX = $state(0);
-	let resizeStartY = $state(0);
-	let resizeStartW = $state(0);
-	let resizeStartH = $state(0);
-	let resizeStartLeft = $state(0);
-	let resizeStartTop = $state(0);
-
 	// Snap layout flyout state
 	let showSnapLayout = $state(false);
 	let snapLayoutTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
 
-	const EDGE_SIZE = 8;
 	const SNAP_ZONE = 10;
 	const TASKBAR_HEIGHT = 48;
 
@@ -191,83 +180,43 @@
 		}
 	}
 
-	function getEdge(e: MouseEvent, el: HTMLElement): string {
-		if (ws?.maximized) return '';
-		const rect = el.getBoundingClientRect();
-		const x = e.clientX - rect.left;
-		const y = e.clientY - rect.top;
-		const w = rect.width;
-		const h = rect.height;
-
-		let edge = '';
-		if (y < EDGE_SIZE) edge += 'n';
-		else if (y > h - EDGE_SIZE) edge += 's';
-		if (x < EDGE_SIZE) edge += 'w';
-		else if (x > w - EDGE_SIZE) edge += 'e';
-		return edge;
-	}
-
-	function getCursorForEdge(edge: string): string {
-		switch (edge) {
-			case 'n': case 's': return 'ns-resize';
-			case 'e': case 'w': return 'ew-resize';
-			case 'ne': case 'sw': return 'nesw-resize';
-			case 'nw': case 'se': return 'nwse-resize';
-			default: return '';
-		}
-	}
-
-	function handleFrameMouseMove(e: MouseEvent) {
-		if (resizing || dragging) return;
-		const el = e.currentTarget as HTMLElement;
-		const edge = getEdge(e, el);
-		const cursor = getCursorForEdge(edge);
-		el.style.cursor = cursor || '';
-	}
-
-	function handleFrameMouseDown(e: MouseEvent) {
-		const el = e.currentTarget as HTMLElement;
-		const edge = getEdge(e, el);
-		if (!edge || ws?.maximized) return;
+	function startResize(edge: string, e: MouseEvent) {
+		if (ws?.maximized) return;
 
 		e.preventDefault();
 		e.stopPropagation();
 		wm.focusApp(appId);
 
-		resizing = true;
-		resizeEdge = edge;
-		resizeStartX = e.clientX;
-		resizeStartY = e.clientY;
-		resizeStartW = ws?.width ?? 400;
-		resizeStartH = ws?.height ?? 300;
-		resizeStartLeft = ws?.x ?? 0;
-		resizeStartTop = ws?.y ?? 0;
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const startW = ws?.width ?? 400;
+		const startH = ws?.height ?? 300;
+		const startLeft = ws?.x ?? 0;
+		const startTop = ws?.y ?? 0;
 
 		function onMouseMove(e: MouseEvent) {
-			if (!resizing) return;
-			const dx = e.clientX - resizeStartX;
-			const dy = e.clientY - resizeStartY;
+			const dx = e.clientX - startX;
+			const dy = e.clientY - startY;
 
-			let newW = resizeStartW;
-			let newH = resizeStartH;
-			let newX = resizeStartLeft;
-			let newY = resizeStartTop;
+			let newW = startW;
+			let newH = startH;
+			let newX = startLeft;
+			let newY = startTop;
 
-			if (resizeEdge.includes('e')) newW = resizeStartW + dx;
-			if (resizeEdge.includes('w')) { newW = resizeStartW - dx; newX = resizeStartLeft + dx; }
-			if (resizeEdge.includes('s')) newH = resizeStartH + dy;
-			if (resizeEdge.includes('n')) { newH = resizeStartH - dy; newY = resizeStartTop + dy; }
+			if (edge.includes('e')) newW = startW + dx;
+			if (edge.includes('w')) { newW = startW - dx; newX = startLeft + dx; }
+			if (edge.includes('s')) newH = startH + dy;
+			if (edge.includes('n')) { newH = startH - dy; newY = startTop + dy; }
 
 			const minW = config.minWidth ?? 200;
 			const minH = config.minHeight ?? 150;
 
-			// Clamp and prevent position shift if at min size
 			if (newW < minW) {
-				if (resizeEdge.includes('w')) newX = resizeStartLeft + (resizeStartW - minW);
+				if (edge.includes('w')) newX = startLeft + (startW - minW);
 				newW = minW;
 			}
 			if (newH < minH) {
-				if (resizeEdge.includes('n')) newY = resizeStartTop + (resizeStartH - minH);
+				if (edge.includes('n')) newY = startTop + (startH - minH);
 				newH = minH;
 			}
 
@@ -276,12 +225,8 @@
 		}
 
 		function onMouseUp() {
-			resizing = false;
-			resizeEdge = '';
 			window.removeEventListener('mousemove', onMouseMove);
 			window.removeEventListener('mouseup', onMouseUp);
-			// Reset cursor
-			el.style.cursor = '';
 		}
 
 		window.addEventListener('mousemove', onMouseMove);
@@ -305,8 +250,6 @@
 	style:height="{ws?.maximized ? 'calc(100% - var(--taskbar-height))' : ws?.height + 'px'}"
 	style:z-index={ws?.zIndex}
 	onclick={handleWindowClick}
-	onmousemove={handleFrameMouseMove}
-	onmousedown={handleFrameMouseDown}
 >
 	<!-- Title bar -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -400,6 +343,25 @@
 	<div class="window-content">
 		{@render children()}
 	</div>
+
+	{#if !ws?.maximized}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-n" onmousedown={(e) => startResize('n', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-s" onmousedown={(e) => startResize('s', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-w" onmousedown={(e) => startResize('w', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-e" onmousedown={(e) => startResize('e', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-nw" onmousedown={(e) => startResize('nw', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-ne" onmousedown={(e) => startResize('ne', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-sw" onmousedown={(e) => startResize('sw', e)}></div>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="resize-handle resize-se" onmousedown={(e) => startResize('se', e)}></div>
+	{/if}
 </div>
 
 <style>
@@ -615,4 +577,19 @@
 		position: relative;
 		border-radius: 0 0 var(--win-radius-md) var(--win-radius-md);
 	}
+
+	/* Edge handles extend slightly outside the frame so the grab zone straddles the border. */
+	.resize-handle {
+		position: absolute;
+		z-index: 1000;
+	}
+
+	.resize-n { top: -5px; left: 14px; right: 14px; height: 10px; cursor: ns-resize; }
+	.resize-s { bottom: -5px; left: 14px; right: 14px; height: 10px; cursor: ns-resize; }
+	.resize-w { left: -5px; top: 14px; bottom: 14px; width: 10px; cursor: ew-resize; }
+	.resize-e { right: -5px; top: 14px; bottom: 14px; width: 10px; cursor: ew-resize; }
+	.resize-nw { top: -5px; left: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
+	.resize-ne { top: -5px; right: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
+	.resize-sw { bottom: -5px; left: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
+	.resize-se { bottom: -5px; right: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
 </style>
