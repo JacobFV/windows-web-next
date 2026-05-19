@@ -76,7 +76,22 @@
 	}
 
 	function buildProxyUrl(target: string, sessionId: string): string {
-		return `/api/proxy?url=${encodeURIComponent(target)}&session=${encodeURIComponent(sessionId)}`;
+		// Path-based form (MUST match api/proxy.ts proxify()). Webpack-bundled
+		// sites compute publicPath from document.currentScript.src; a query-
+		// based /api/proxy?url=… URL makes webpack pick /api/ as publicPath
+		// and chunk fetches go to /api/<chunkId>.js → 404. The /api/proxy/<scheme>/<host>/<path>
+		// form preserves the path structure so publicPath auto-detect works.
+		try {
+			const u = new URL(target);
+			if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+				return `/api/proxy?url=${encodeURIComponent(target)}&__s=${encodeURIComponent(sessionId)}`;
+			}
+			const scheme = u.protocol.slice(0, -1);
+			const sep = u.search ? '&' : '?';
+			return `/api/proxy/${scheme}/${u.host}${u.pathname}${u.search}${sep}__s=${encodeURIComponent(sessionId)}`;
+		} catch {
+			return `/api/proxy?url=${encodeURIComponent(target)}&__s=${encodeURIComponent(sessionId)}`;
+		}
 	}
 
 	// Map of tab id -> EventSource. Kept outside reactive state because
@@ -235,7 +250,7 @@
 		// Fire-and-forget DELETE — the proxy clears its in-memory jar for
 		// this session id. If it fails (e.g. offline) we still rotate the
 		// session id below, which has the same client-visible effect.
-		fetch(`/api/proxy?session=${encodeURIComponent(tab.sessionId)}`, { method: 'DELETE' }).catch(() => {});
+		fetch(`/api/proxy?__s=${encodeURIComponent(tab.sessionId)}`, { method: 'DELETE' }).catch(() => {});
 		closeSessionStream(tab.id);
 		tab.sessionId = newSessionId();
 		tab.proxyStreamError = false;

@@ -176,10 +176,62 @@ function publish(sessionId: string, ev: SessionEvent): void {
 // -----------------------------------------------------------------------------
 
 function proxify(absoluteUrl: string, sessionId: string): string {
-	// WHY encodeURIComponent (not encodeURI): we're stuffing a full URL into a
-	// query value. encodeURI leaves `?`, `&`, `=` raw which collide with our
-	// own query string.
-	return `/api/proxy?url=${encodeURIComponent(absoluteUrl)}&session=${encodeURIComponent(sessionId)}`;
+	// WHY path-based (not ?url=…): webpack's __webpack_require__.p (publicPath)
+	// auto-detect uses document.currentScript.src.lastIndexOf('/') to figure
+	// out where assets live. With a query-based URL like /api/proxy?url=… the
+	// last `/` is in `/api/proxy`, so webpack sets publicPath="/api/" and
+	// chunks request /api/<chunkId>.js → 404. With a path-based URL like
+	// /api/proxy/host/assets/main.js, publicPath becomes
+	// /api/proxy/host/assets/ and chunks load from /api/proxy/host/assets/<chunkId>.js
+	// which routes back through us correctly.
+	//
+	// Format: /api/proxy/<scheme>/<host>/<path...>?<upstream-query>&__s=<session>
+	// We keep the scheme in the path because some sites use http: and some https:
+	// (yes, plain HTTP still exists). The leading slash separators preserve
+	// path structure exactly so webpack's substring math works.
+	//
+	// Session id moves to query param "__s" to avoid collision with upstream
+	// query params (which we want to forward as-is).
+	try {
+		const u = new URL(absoluteUrl);
+		const scheme = u.protocol.slice(0, -1); // 'https:' -> 'https'
+		const host = u.host; // includes port if present
+		const pathname = u.pathname || '/';
+		const search = u.search; // includes leading '?' or empty
+		const sep = search ? '&' : '?';
+		return `/api/proxy/${scheme}/${host}${pathname}${search}${sep}__s=${encodeURIComponent(sessionId)}`;
+	} catch {
+		// Malformed URL — fall back to query form so we still attempt the fetch.
+		return `/api/proxy?url=${encodeURIComponent(absoluteUrl)}&__s=${encodeURIComponent(sessionId)}`;
+	}
+}
+
+// Inverse of proxify(): parse /api/proxy/<scheme>/<host>/<path>?<query>&__s=… back
+// into the original absolute URL + sessionId. Also accepts the legacy
+// ?url=… form so existing bookmarks / inflight requests keep working.
+function deproxify(reqUrl: URL): { target: string | null; sessionId: string } {
+	const sessionId = reqUrl.searchParams.get('__s') ?? reqUrl.searchParams.get('session') ?? 'default';
+	const legacy = reqUrl.searchParams.get('url');
+	if (legacy) return { target: legacy, sessionId };
+
+	// Path-based form: /api/proxy/<scheme>/<host>/<rest...>
+	const m = reqUrl.pathname.match(/^\/api\/proxy\/(https?|http)\/([^/]+)(\/.*)?$/);
+	if (!m) return { target: null, sessionId };
+	const scheme = m[1];
+	const host = m[2];
+	const pathname = m[3] ?? '/';
+
+	// Forward all upstream query params (everything except our __s/session).
+	const upstream = new URLSearchParams();
+	for (const [k, v] of reqUrl.searchParams) {
+		if (k === '__s' || k === 'session') continue;
+		upstream.append(k, v);
+	}
+	const qs = upstream.toString();
+	return {
+		target: `${scheme}://${host}${pathname}${qs ? '?' + qs : ''}`,
+		sessionId,
+	};
 }
 
 function absolutize(maybeRelative: string, base: string): string | null {
@@ -343,6 +395,9 @@ function injectClientScript(html: string, targetOrigin: string, sessionId: strin
 	const script = `<script>(function(){
 		var SESSION = ${safeSession};
 		var ORIGIN = ${safeOrigin};
+		// MUST match the server-side proxify() in api/proxy.ts. Path-based
+		// (not ?url=…) so webpack's publicPath auto-detect works for chunk loads.
+		// See the WHY comment on proxify() in api/proxy.ts for full reasoning.
 		function proxify(u){
 			try {
 				if (!u) return u;
@@ -350,8 +405,11 @@ function injectClientScript(html: string, targetOrigin: string, sessionId: strin
 				if (u.indexOf('/api/proxy') === 0) return u;
 				if (/^(data|blob|javascript|mailto|tel|about):/i.test(u)) return u;
 				if (u.charAt(0) === '#') return u;
-				var abs = new URL(u, ORIGIN).toString();
-				return '/api/proxy?url=' + encodeURIComponent(abs) + '&session=' + encodeURIComponent(SESSION);
+				var p = new URL(u, ORIGIN);
+				if (p.protocol !== 'http:' && p.protocol !== 'https:') return u;
+				var scheme = p.protocol.slice(0, -1);
+				var sep = p.search ? '&' : '?';
+				return '/api/proxy/' + scheme + '/' + p.host + p.pathname + p.search + sep + '__s=' + encodeURIComponent(SESSION);
 			} catch(e) { return u; }
 		}
 		// WHY a try-around-each-patch: if a browser quirk makes one patch throw
@@ -527,9 +585,10 @@ export default async function handler(req: Request): Promise<Response> {
 		});
 	}
 
-	const sessionId = url.searchParams.get('session') || 'default';
+	// Parse both URL formats (path-based + legacy ?url=…)
+	const { target, sessionId } = deproxify(url);
 
-	// DELETE /api/proxy?session=X — clear the cookie jar for that session
+	// DELETE /api/proxy?__s=X — clear the cookie jar for that session
 	if (req.method === 'DELETE') {
 		clearJar(sessionId);
 		publish(sessionId, { type: 'jar-cleared' });
@@ -539,9 +598,8 @@ export default async function handler(req: Request): Promise<Response> {
 		});
 	}
 
-	const target = url.searchParams.get('url');
 	if (!target) {
-		return new Response('Missing ?url=', { status: 400 });
+		return new Response('Missing target URL (use /api/proxy/<scheme>/<host>/<path>)', { status: 400 });
 	}
 
 	let targetUrl: URL;
