@@ -120,6 +120,9 @@
 					{ label: 'Large icons', action() { wm.desktopIconSize = 'large'; } },
 					{ label: 'Medium icons', action() { wm.desktopIconSize = 'medium'; } },
 					{ label: 'Small icons', action() { wm.desktopIconSize = 'small'; } },
+					{ label: '', separator: true },
+					{ label: (wm.autoArrangeIcons ? '✓ ' : '') + 'Auto arrange icons', action() { wm.toggleAutoArrange(); } },
+					{ label: 'Align icons to grid', action() { wm.alignDesktopIconsToGrid(); } },
 				]},
 				{ label: 'Sort by', icon: '↕', submenu: [
 					{ label: 'Name', action() { wm.sortDesktopIcons('name'); } },
