@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	import AppIcon from './AppIcon.svelte';
 
 	// List of apps currently open (in their open order).
 	let apps = $derived<AppID[]>(wm.openApps);
@@ -47,7 +48,7 @@
 						onclick={() => selectAndCommit(id)}
 					>
 						<div class="alt-tab-header">
-							<span class="alt-tab-icon">{cfg.icon}</span>
+							<span class="alt-tab-icon"><AppIcon id={id} size={20} /></span>
 							<span class="alt-tab-title">{cfg.title}</span>
 						</div>
 						<div class="alt-tab-preview"></div>

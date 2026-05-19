@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
 	import { preferences } from '../state/preferences.svelte.ts';
+	import AppIcon from './AppIcon.svelte';
 
 	let apps = $derived<AppID[]>(wm.openApps);
 
@@ -52,7 +53,7 @@
 							</svg>
 						</button>
 						<div class="tile-preview">
-							<span class="tile-icon">{cfg.icon}</span>
+							<span class="tile-icon"><AppIcon id={id} size={48} /></span>
 						</div>
 						<div class="tile-title">{cfg.title}</div>
 					</div>
