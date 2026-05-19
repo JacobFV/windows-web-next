@@ -19,7 +19,7 @@
 	}
 
 	// Mapping from AppID to process display info
-	const appProcessInfo: Record<AppID, { name: string; icon: string; cpu: number; memory: number; disk: number; network: number; pid: number }> = {
+	const appProcessInfo: Partial<Record<AppID, { name: string; icon: string; cpu: number; memory: number; disk: number; network: number; pid: number }>> = {
 		'edge': { name: 'Microsoft Edge', icon: '🌐', cpu: 3.2, memory: 812, disk: 0.1, network: 0.5, pid: 1024 },
 		'file-explorer': { name: 'File Explorer', icon: '📁', cpu: 0.1, memory: 42, disk: 0, network: 0, pid: 1436 },
 		'terminal': { name: 'Windows Terminal', icon: '💻', cpu: 0.4, memory: 128, disk: 0, network: 0, pid: 1848 },

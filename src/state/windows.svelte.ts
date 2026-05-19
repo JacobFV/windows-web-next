@@ -44,6 +44,10 @@ export interface DesktopIcon {
 	appId?: AppID;
 	/** VFS path for file/directory icons — when set, double-click uses openFile() instead of openApp(). */
 	path?: string;
+	/** Grid cell column (0-based). Defaults to 0 if unset. */
+	gridX?: number;
+	/** Grid cell row (0-based). Defaults to 0 if unset. */
+	gridY?: number;
 }
 
 export interface AppConfig {
@@ -275,12 +279,12 @@ function createInitialWindowState(config: AppConfig, index: number): WindowState
 }
 
 const defaultDesktopIcons: DesktopIcon[] = [
-	{ name: 'This PC', icon: '💻', appId: 'file-explorer' },
-	{ name: 'Recycle Bin', icon: '🗑️' },
-	{ name: 'Documents', icon: '📁', appId: 'file-explorer' },
-	{ name: 'Projects', icon: '📂', appId: 'file-explorer', path: 'C:/Users/User/Desktop/Project Files' },
-	{ name: 'Notes.txt', icon: '📄', path: 'C:/Users/User/Desktop/Notes.txt' },
-	{ name: 'Screenshots', icon: '📁', path: 'C:/Users/User/Desktop/Screenshots' },
+	{ name: 'This PC', icon: '💻', appId: 'file-explorer', gridX: 0, gridY: 0 },
+	{ name: 'Recycle Bin', icon: '🗑️', gridX: 0, gridY: 1 },
+	{ name: 'Documents', icon: '📁', appId: 'file-explorer', gridX: 0, gridY: 2 },
+	{ name: 'Projects', icon: '📂', appId: 'file-explorer', path: 'C:/Users/User/Desktop/Project Files', gridX: 0, gridY: 3 },
+	{ name: 'Notes.txt', icon: '📄', path: 'C:/Users/User/Desktop/Notes.txt', gridX: 0, gridY: 4 },
+	{ name: 'Screenshots', icon: '📁', path: 'C:/Users/User/Desktop/Screenshots', gridX: 0, gridY: 5 },
 ];
 
 export interface SnapPreview {
@@ -310,6 +314,7 @@ class WindowManager {
 	desktopSortBy = $state<DesktopSortBy>('name');
 	desktopIcons = $state<DesktopIcon[]>([...defaultDesktopIcons]);
 	selectedDesktopIcon = $state<number | null>(null);
+	autoArrangeIcons = $state<boolean>(false);
 	snapPreview = $state<SnapPreview | null>(null);
 
 	openApp(id: AppID) {
@@ -426,7 +431,7 @@ class WindowManager {
 
 	sortDesktopIcons(by: DesktopSortBy) {
 		this.desktopSortBy = by;
-		this.desktopIcons = [...this.desktopIcons].sort((a, b) => {
+		const sorted = [...this.desktopIcons].sort((a, b) => {
 			if (by === 'name') return a.name.localeCompare(b.name);
 			if (by === 'type') {
 				const extA = a.name.includes('.') ? a.name.split('.').pop() ?? '' : '';
@@ -435,10 +440,17 @@ class WindowManager {
 			}
 			return a.name.localeCompare(b.name);
 		});
+		this.desktopIcons = sorted.map((icon, i) => ({ ...icon, gridX: 0, gridY: i }));
 	}
 
 	addDesktopIcon(icon: DesktopIcon) {
-		this.desktopIcons = [...this.desktopIcons, icon];
+		const placed = { ...icon };
+		if (placed.gridX === undefined || placed.gridY === undefined) {
+			const slot = this.findFreeCell(0, 0);
+			placed.gridX = slot.gridX;
+			placed.gridY = slot.gridY;
+		}
+		this.desktopIcons = [...this.desktopIcons, placed];
 	}
 
 	removeDesktopIcon(index: number) {
@@ -451,6 +463,53 @@ class WindowManager {
 		const [moved] = icons.splice(fromIndex, 1);
 		icons.splice(toIndex, 0, moved);
 		this.desktopIcons = icons;
+	}
+
+	moveDesktopIconTo(index: number, gridX: number, gridY: number) {
+		if (!this.desktopIcons[index]) return;
+		const target = this.findFreeCell(gridX, gridY, index);
+		const icons = this.desktopIcons.map((icon, i) =>
+			i === index ? { ...icon, gridX: target.gridX, gridY: target.gridY } : icon
+		);
+		this.desktopIcons = icons;
+	}
+
+	/** Find nearest free grid cell starting from (gridX, gridY), spiraling outward. */
+	findFreeCell(gridX: number, gridY: number, ignoreIndex: number = -1): { gridX: number; gridY: number } {
+		const isOccupied = (x: number, y: number) =>
+			this.desktopIcons.some((icon, i) =>
+				i !== ignoreIndex && (icon.gridX ?? 0) === x && (icon.gridY ?? 0) === y
+			);
+		if (!isOccupied(gridX, gridY)) return { gridX, gridY };
+		for (let radius = 1; radius < 50; radius++) {
+			for (let dx = -radius; dx <= radius; dx++) {
+				for (let dy = -radius; dy <= radius; dy++) {
+					if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+					const x = gridX + dx;
+					const y = gridY + dy;
+					if (x < 0 || y < 0) continue;
+					if (!isOccupied(x, y)) return { gridX: x, gridY: y };
+				}
+			}
+		}
+		return { gridX, gridY };
+	}
+
+	autoArrangeDesktopIcons() {
+		this.desktopIcons = this.desktopIcons.map((icon, i) => ({ ...icon, gridX: 0, gridY: i }));
+	}
+
+	alignDesktopIconsToGrid() {
+		this.desktopIcons = this.desktopIcons.map((icon) => ({
+			...icon,
+			gridX: Math.max(0, Math.round(icon.gridX ?? 0)),
+			gridY: Math.max(0, Math.round(icon.gridY ?? 0)),
+		}));
+	}
+
+	toggleAutoArrange() {
+		this.autoArrangeIcons = !this.autoArrangeIcons;
+		if (this.autoArrangeIcons) this.autoArrangeDesktopIcons();
 	}
 }
 

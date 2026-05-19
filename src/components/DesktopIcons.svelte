@@ -1,14 +1,38 @@
 <script lang="ts">
-	import { wm, type AppID } from '../state/windows.svelte.ts';
+	import { wm } from '../state/windows.svelte.ts';
 	import { openFile } from '../state/file-opener.svelte';
 
+	const TASKBAR_H = 48;
+	const DRAG_THRESHOLD = 4;
+
 	let animatingIndex = $state<number | null>(null);
-	let dragIndex = $state<number | null>(null);
-	let dropTarget = $state<number | null>(null);
+	let dragState = $state<{
+		index: number;
+		pointerX: number;
+		pointerY: number;
+		offsetX: number;
+		offsetY: number;
+		started: boolean;
+	} | null>(null);
+	let containerEl = $state<HTMLDivElement | null>(null);
 
 	let selectedIndex = $derived(wm.selectedDesktopIcon);
 	let iconSizeClass = $derived(wm.desktopIconSize);
 	let icons = $derived(wm.desktopIcons);
+
+	let cellSize = $derived.by(() => {
+		if (wm.desktopIconSize === 'large') return { w: 110, h: 120 };
+		if (wm.desktopIconSize === 'small') return { w: 72, h: 76 };
+		return { w: 90, h: 100 };
+	});
+
+	function iconLeft(icon: typeof icons[number]): number {
+		return (icon.gridX ?? 0) * cellSize.w;
+	}
+
+	function iconTop(icon: typeof icons[number]): number {
+		return (icon.gridY ?? 0) * cellSize.h;
+	}
 
 	function handleClick(index: number, e: MouseEvent) {
 		e.stopPropagation();
@@ -17,75 +41,127 @@
 
 	function handleDoubleClick(index: number) {
 		const icon = icons[index];
-		// Trigger scale animation
 		animatingIndex = index;
 		setTimeout(() => { animatingIndex = null; }, 200);
 
-		console.log('[DesktopIcons] dblclick on:', icon.name, 'appId:', icon.appId, 'path:', icon.path);
 		if (icon.path) {
-			// File/directory icon — use file-opener to resolve the right app
 			openFile(icon.path);
 		} else if (icon.appId) {
 			wm.openApp(icon.appId);
 		} else if (icon.name === 'Recycle Bin') {
 			wm.openApp('file-explorer');
 		}
-		console.log('[DesktopIcons] after open, wm.openApps:', JSON.stringify(wm.openApps));
 	}
 
-	function handleDragStart(index: number, e: DragEvent) {
-		dragIndex = index;
-		if (e.dataTransfer) {
-			e.dataTransfer.effectAllowed = 'move';
-			e.dataTransfer.setData('text/plain', String(index));
+	function handleMouseDown(index: number, e: MouseEvent) {
+		if (e.button !== 0) return;
+		e.stopPropagation();
+		wm.selectedDesktopIcon = index;
+
+		const icon = icons[index];
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const rect = containerEl?.getBoundingClientRect();
+		const originLeft = (rect?.left ?? 0) + iconLeft(icon);
+		const originTop = (rect?.top ?? 0) + iconTop(icon);
+		const offsetX = startX - originLeft;
+		const offsetY = startY - originTop;
+
+		dragState = {
+			index,
+			pointerX: startX,
+			pointerY: startY,
+			offsetX,
+			offsetY,
+			started: false,
+		};
+
+		function onMove(ev: MouseEvent) {
+			if (!dragState) return;
+			const dx = ev.clientX - startX;
+			const dy = ev.clientY - startY;
+			if (!dragState.started && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+			dragState = {
+				...dragState,
+				started: true,
+				pointerX: ev.clientX,
+				pointerY: ev.clientY,
+			};
 		}
-	}
 
-	function handleDragOver(index: number, e: DragEvent) {
-		e.preventDefault();
-		if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-		dropTarget = index;
-	}
-
-	function handleDragLeave() {
-		dropTarget = null;
-	}
-
-	function handleDrop(toIndex: number, e: DragEvent) {
-		e.preventDefault();
-		if (dragIndex !== null && dragIndex !== toIndex) {
-			wm.moveDesktopIcon(dragIndex, toIndex);
-			wm.selectedDesktopIcon = toIndex;
+		function onUp(ev: MouseEvent) {
+			window.removeEventListener('mousemove', onMove);
+			window.removeEventListener('mouseup', onUp);
+			if (!dragState) return;
+			if (!dragState.started) {
+				dragState = null;
+				return;
+			}
+			const idx = dragState.index;
+			const cRect = containerEl?.getBoundingClientRect();
+			const relX = ev.clientX - (cRect?.left ?? 0) - dragState.offsetX;
+			const relY = ev.clientY - (cRect?.top ?? 0) - dragState.offsetY;
+			const maxCols = Math.max(1, Math.floor((window.innerWidth) / cellSize.w));
+			const maxRows = Math.max(1, Math.floor((window.innerHeight - TASKBAR_H) / cellSize.h));
+			let gridX = Math.round(relX / cellSize.w);
+			let gridY = Math.round(relY / cellSize.h);
+			gridX = Math.max(0, Math.min(maxCols - 1, gridX));
+			gridY = Math.max(0, Math.min(maxRows - 1, gridY));
+			if (wm.autoArrangeIcons) {
+				const slot = wm.findFreeCell(0, 0, idx);
+				wm.moveDesktopIconTo(idx, slot.gridX, slot.gridY);
+			} else {
+				wm.moveDesktopIconTo(idx, gridX, gridY);
+			}
+			dragState = null;
 		}
-		dragIndex = null;
-		dropTarget = null;
+
+		window.addEventListener('mousemove', onMove);
+		window.addEventListener('mouseup', onUp);
 	}
 
-	function handleDragEnd() {
-		dragIndex = null;
-		dropTarget = null;
+	function handleKeyDown(e: KeyboardEvent) {
+		if (selectedIndex === null) return;
+		const icon = icons[selectedIndex];
+		if (!icon) return;
+		let dx = 0;
+		let dy = 0;
+		if (e.key === 'ArrowLeft') dx = -1;
+		else if (e.key === 'ArrowRight') dx = 1;
+		else if (e.key === 'ArrowUp') dy = -1;
+		else if (e.key === 'ArrowDown') dy = 1;
+		else return;
+		e.preventDefault();
+		const nx = Math.max(0, (icon.gridX ?? 0) + dx);
+		const ny = Math.max(0, (icon.gridY ?? 0) + dy);
+		if (wm.autoArrangeIcons) return;
+		wm.moveDesktopIconTo(selectedIndex, nx, ny);
 	}
+
+	$effect(() => {
+		window.addEventListener('keydown', handleKeyDown);
+		return () => window.removeEventListener('keydown', handleKeyDown);
+	});
 </script>
 
-<div class="desktop-icons">
+<div class="desktop-icons" bind:this={containerEl}>
 	{#each icons as icon, i (icon.name + '-' + i)}
+		{@const isDragging = dragState?.index === i && dragState.started}
+		{@const ghostLeft = isDragging && dragState ? dragState.pointerX - dragState.offsetX - (containerEl?.getBoundingClientRect().left ?? 0) : iconLeft(icon)}
+		{@const ghostTop = isDragging && dragState ? dragState.pointerY - dragState.offsetY - (containerEl?.getBoundingClientRect().top ?? 0) : iconTop(icon)}
 		<!-- svelte-ignore a11y_click_events_have_key_events -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="desktop-icon {iconSizeClass}"
 			class:selected={selectedIndex === i}
 			class:bounce={animatingIndex === i}
-			class:drag-over={dropTarget === i}
-			class:dragging={dragIndex === i}
+			class:dragging={isDragging}
 			data-index={i}
-			draggable="true"
+			style:left="{ghostLeft}px"
+			style:top="{ghostTop}px"
 			onclick={(e) => handleClick(i, e)}
 			ondblclick={() => handleDoubleClick(i)}
-			ondragstart={(e) => handleDragStart(i, e)}
-			ondragover={(e) => handleDragOver(i, e)}
-			ondragleave={handleDragLeave}
-			ondrop={(e) => handleDrop(i, e)}
-			ondragend={handleDragEnd}
+			onmousedown={(e) => handleMouseDown(i, e)}
 		>
 			<span class="icon-emoji">{icon.icon}</span>
 			<span class="icon-label">{icon.name}</span>
@@ -96,15 +172,13 @@
 <style>
 	.desktop-icons {
 		position: absolute;
-		top: 12px;
-		left: 12px;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
+		inset: 12px 12px 60px 12px;
 		z-index: 1;
+		pointer-events: none;
 	}
 
 	.desktop-icon {
+		position: absolute;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -113,7 +187,9 @@
 		padding: 8px 4px;
 		border-radius: var(--win-radius-sm);
 		cursor: default;
+		pointer-events: auto;
 		transition: background-color 0.08s ease, transform 0.15s ease, opacity 0.15s ease;
+		user-select: none;
 	}
 
 	.desktop-icon.large {
@@ -160,12 +236,10 @@
 	}
 
 	.desktop-icon.dragging {
-		opacity: 0.4;
-	}
-
-	.desktop-icon.drag-over {
-		background: rgba(255, 255, 255, 0.25);
-		outline: 1px dashed rgba(255, 255, 255, 0.5);
+		opacity: 0.7;
+		transition: none;
+		z-index: 9999;
+		pointer-events: none;
 	}
 
 	@keyframes iconBounce {
