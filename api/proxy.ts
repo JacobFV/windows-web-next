@@ -1,516 +1,647 @@
-/**
- * Vercel Serverless Function: HTTP(S) browsing proxy for the Edge app.
- *
- * Endpoint: GET|POST /api/proxy?url=<encoded-target-url>&session=<sessionId>
- *
- * What it does:
- *   1. Server-side fetches the target URL with cookies stored for `sessionId`.
- *   2. Persists Set-Cookie headers back into the per-session jar.
- *   3. Rewrites HTML/CSS so that all subresource/link/form URLs route back
- *      through /api/proxy?url=...&session=...
- *   4. Injects a small client-side script into proxied HTML to re-route
- *      fetch / XHR / location / history calls through the proxy and forward
- *      navigation events to the parent via postMessage.
- *   5. Strips frame-blocking response headers (X-Frame-Options, CSP, COOP, CORP)
- *      so the proxied page can be embedded in our <iframe>.
- *
- * Known limits / non-goals:
- *   - In-memory cookie jar: per-instance only. Serverless instances are
- *     ephemeral and per-region, so cookies will appear to "expire" between
- *     instances. TODO(prod): swap in Redis / Vercel KV.
- *   - No WebSocket support — sites that rely on `new WebSocket(...)` won't
- *     work fully (chat, live updates). The injected script can't transparently
- *     proxy WS handshakes from inside the iframe.
- *   - Anti-bot / CSP-strict sites (Cloudflare challenges, banking) will reject
- *     the request server-side. That's expected.
- *   - Regex-based HTML/CSS rewriting handles ~80% of real sites. Edge cases
- *     (template strings building URLs at runtime, exotic srcset spacing) may
- *     slip through. We deliberately avoid cheerio/jsdom to stay dep-free.
- *
- * Why the Web Standard fetch() handler signature:
- *   - Request/Response are global in TypeScript's DOM lib, so no @vercel/node
- *     or @types/node dependency is needed (project rule: no new deps).
- *   - Vercel runs this on Node 20+ where fetch/Request/Response are native.
- */
+// =============================================================================
+// api/proxy.ts — Edge-runtime web proxy for the in-browser Edge app
+// =============================================================================
+//
+// Run locally with: npx vercel dev    (vite alone won't serve /api/*)
+//
+// WHY Edge runtime (not Node): Vercel's default Node serverless runtime expects
+// a (req: VercelRequest, res: VercelResponse) handler signature. Exporting a
+// Web-Standard `(req: Request) => Response` handler under Node causes
+// FUNCTION_INVOCATION_FAILED (the 500 we were seeing). Edge runtime accepts
+// Web Standard `Request`/`Response` natively, supports streaming bodies (which
+// we need to pipe binary content through), and gives 30s of wall time on the
+// Hobby plan (vs 10s on Node Hobby). Pro raises this to 60/300s.
+//
+// WHY no true WebSocket: Vercel Serverless AND Edge Functions are
+// request/response only — they cannot hold a persistent socket open. There is
+// no upgrade path. If you need real WS, deploy a separate server (Fly.io /
+// Railway / Render) and point the client at it. For everything else, see
+// api/session.ts which gives us a server->client stream over SSE — that's our
+// "WS-equivalent" on Vercel.
+//
+// WHY proxified URL goes in `?url=` not in the path: putting the target URL
+// in the path forces double-encoding (the browser re-encodes any %xx in the
+// path), which mangles query strings and breaks signed URLs. Query params are
+// only encoded once, which is what we want.
+//
+// EDGE RUNTIME LIMITS (don't accidentally break these):
+//   - No Node modules. No `fs`, no `http`, no `Buffer` constructor (use
+//     `Uint8Array` or `TextEncoder`/`TextDecoder`).
+//   - Global `fetch` is available and is the only HTTP client.
+//   - 4 MB request-body cap.
+//   - In-memory state (this file's top-level Maps) lives only for the
+//     lifetime of an Edge isolate. Cold starts wipe it. See "cookie jar
+//     caveat" below.
+// =============================================================================
 
 export const config = {
-	// Request the highest timeout Vercel will allow on the deployment plan.
-	// Hobby caps at 10s, Pro at 60s — asking for 60 doesn't hurt on Hobby.
-	maxDuration: 60,
+	runtime: 'edge',
 };
 
-// ---------------------------------------------------------------------------
-// Per-instance cookie jar.
-// Keyed by `${sessionId}|${origin}` so a single session can hold cookies for
-// multiple origins (cross-site cookies are intentionally not shared — same
-// model as a real browser tab).
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Cookie jar
+// -----------------------------------------------------------------------------
+// WHY in-memory and not Redis/KV: zero new deps, demo-grade. Each Edge isolate
+// gets its own jar; if a user's request routes to a cold instance their
+// session may appear "logged out". For production, swap this Map for Vercel
+// KV / Upstash Redis behind the same get/set/clear interface — nothing else
+// in this file should need to change.
+// -----------------------------------------------------------------------------
 
-interface StoredCookie {
+type Cookie = {
 	name: string;
 	value: string;
-	expires?: number; // epoch ms; undefined = session cookie
+	domain?: string;
 	path?: string;
+	expires?: number; // epoch ms
+	secure?: boolean;
+	httpOnly?: boolean;
+	sameSite?: string;
+};
+
+// keyed by `${sessionId}|${originHost}`
+const cookieJar: Map<string, Cookie[]> = (globalThis as any).__edgeCookieJar ?? new Map();
+(globalThis as any).__edgeCookieJar = cookieJar;
+
+function jarKey(sessionId: string, originHost: string): string {
+	return `${sessionId}|${originHost}`;
 }
 
-const cookieJar = new Map<string, Map<string, StoredCookie>>();
-
-function jarKey(sessionId: string, origin: string): string {
-	return `${sessionId}|${origin}`;
+// WHY a hand-rolled Set-Cookie parser: Edge runtime has no `tough-cookie`
+// equivalent. We do the bare minimum needed for session continuity (name,
+// value, expires/max-age, path, domain). We ignore HttpOnly/Secure for
+// transmission decisions since we're the only client of the upstream.
+function parseSetCookie(header: string, originHost: string): Cookie | null {
+	const parts = header.split(';').map((s) => s.trim());
+	if (parts.length === 0) return null;
+	const [nv] = parts;
+	const eq = nv.indexOf('=');
+	if (eq < 0) return null;
+	const name = nv.slice(0, eq).trim();
+	const value = nv.slice(eq + 1).trim();
+	if (!name) return null;
+	const cookie: Cookie = { name, value, domain: originHost, path: '/' };
+	for (let i = 1; i < parts.length; i++) {
+		const attr = parts[i];
+		const lower = attr.toLowerCase();
+		if (lower.startsWith('domain=')) {
+			cookie.domain = attr.slice(7).replace(/^\./, '').toLowerCase();
+		} else if (lower.startsWith('path=')) {
+			cookie.path = attr.slice(5);
+		} else if (lower.startsWith('expires=')) {
+			const t = Date.parse(attr.slice(8));
+			if (!Number.isNaN(t)) cookie.expires = t;
+		} else if (lower.startsWith('max-age=')) {
+			const s = parseInt(attr.slice(8), 10);
+			if (!Number.isNaN(s)) cookie.expires = Date.now() + s * 1000;
+		} else if (lower === 'secure') {
+			cookie.secure = true;
+		} else if (lower === 'httponly') {
+			cookie.httpOnly = true;
+		} else if (lower.startsWith('samesite=')) {
+			cookie.sameSite = attr.slice(9);
+		}
+	}
+	return cookie;
 }
 
-function getCookies(sessionId: string, origin: string): string {
-	const jar = cookieJar.get(jarKey(sessionId, origin));
-	if (!jar) return '';
+function storeCookies(sessionId: string, originHost: string, setCookies: string[]): string[] {
+	const key = jarKey(sessionId, originHost);
+	const existing = cookieJar.get(key) ?? [];
+	const changed: string[] = [];
+	for (const raw of setCookies) {
+		const c = parseSetCookie(raw, originHost);
+		if (!c) continue;
+		// drop any existing cookie with same name+path
+		const filtered = existing.filter((e) => !(e.name === c.name && e.path === c.path));
+		filtered.push(c);
+		// replace `existing` reference in-place so the loop sees prior writes
+		existing.length = 0;
+		existing.push(...filtered);
+		changed.push(c.name);
+	}
+	cookieJar.set(key, existing);
+	return changed;
+}
+
+function buildCookieHeader(sessionId: string, originHost: string, path: string): string {
+	const key = jarKey(sessionId, originHost);
+	const all = cookieJar.get(key) ?? [];
 	const now = Date.now();
-	const out: string[] = [];
-	for (const [name, c] of jar) {
-		if (c.expires !== undefined && c.expires < now) {
-			jar.delete(name);
-			continue;
+	const matched = all.filter((c) => {
+		if (c.expires && c.expires < now) return false;
+		if (c.path && !path.startsWith(c.path)) return false;
+		return true;
+	});
+	return matched.map((c) => `${c.name}=${c.value}`).join('; ');
+}
+
+function clearJar(sessionId: string): void {
+	for (const key of Array.from(cookieJar.keys())) {
+		if (key.startsWith(`${sessionId}|`)) cookieJar.delete(key);
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Cross-module event bus (consumed by api/session.ts)
+// -----------------------------------------------------------------------------
+// WHY globalThis-attached: api/session.ts and api/proxy.ts are separate Edge
+// functions and may run in *different* isolates, but within a single isolate
+// we share state via globalThis. Same caveat as the cookie jar: best-effort,
+// demo-grade. Use Vercel KV pub/sub or Upstash Redis pubsub for cross-isolate
+// fanout in production.
+// -----------------------------------------------------------------------------
+
+type SessionEvent = { type: string; [k: string]: unknown };
+type Subscriber = (ev: SessionEvent) => void;
+
+const subscribers: Map<string, Set<Subscriber>> =
+	(globalThis as any).__edgeSubscribers ?? new Map();
+(globalThis as any).__edgeSubscribers = subscribers;
+
+function publish(sessionId: string, ev: SessionEvent): void {
+	const set = subscribers.get(sessionId);
+	if (!set) return;
+	for (const fn of set) {
+		try {
+			fn(ev);
+		} catch {
+			/* subscriber errors must not break the proxy */
 		}
-		out.push(`${c.name}=${c.value}`);
-	}
-	return out.join('; ');
-}
-
-function storeSetCookie(sessionId: string, origin: string, setCookieHeaders: string[]): void {
-	if (setCookieHeaders.length === 0) return;
-	const key = jarKey(sessionId, origin);
-	let jar = cookieJar.get(key);
-	if (!jar) {
-		jar = new Map();
-		cookieJar.set(key, jar);
-	}
-	for (const raw of setCookieHeaders) {
-		// Parse "name=value; Expires=...; Path=...; Secure; HttpOnly"
-		const parts = raw.split(';').map((p) => p.trim());
-		if (parts.length === 0) continue;
-		const [name, ...valueParts] = parts[0].split('=');
-		if (!name) continue;
-		const value = valueParts.join('=');
-		const cookie: StoredCookie = { name: name.trim(), value };
-		for (let i = 1; i < parts.length; i++) {
-			const [k, v] = parts[i].split('=');
-			const lk = k.toLowerCase();
-			if (lk === 'expires' && v) {
-				const t = Date.parse(v);
-				if (!Number.isNaN(t)) cookie.expires = t;
-			} else if (lk === 'max-age' && v) {
-				const sec = parseInt(v, 10);
-				if (!Number.isNaN(sec)) cookie.expires = Date.now() + sec * 1000;
-			} else if (lk === 'path' && v) {
-				cookie.path = v;
-			}
-		}
-		jar.set(cookie.name, cookie);
 	}
 }
 
-// ---------------------------------------------------------------------------
-// URL rewriting helpers.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// URL helpers
+// -----------------------------------------------------------------------------
 
-function proxify(targetAbsoluteUrl: string, sessionId: string): string {
-	return `/api/proxy?url=${encodeURIComponent(targetAbsoluteUrl)}&session=${encodeURIComponent(sessionId)}`;
+function proxify(absoluteUrl: string, sessionId: string): string {
+	// WHY encodeURIComponent (not encodeURI): we're stuffing a full URL into a
+	// query value. encodeURI leaves `?`, `&`, `=` raw which collide with our
+	// own query string.
+	return `/api/proxy?url=${encodeURIComponent(absoluteUrl)}&session=${encodeURIComponent(sessionId)}`;
 }
 
-/** Resolve a possibly-relative URL against a base. Returns null on failure. */
-function absolutize(maybeRelative: string, baseUrl: string): string | null {
-	const trimmed = maybeRelative.trim();
-	if (!trimmed) return null;
-	// Skip non-HTTP schemes (data:, javascript:, mailto:, tel:, about:, blob:, #anchor)
-	if (
-		trimmed.startsWith('data:') ||
-		trimmed.startsWith('javascript:') ||
-		trimmed.startsWith('mailto:') ||
-		trimmed.startsWith('tel:') ||
-		trimmed.startsWith('about:') ||
-		trimmed.startsWith('blob:') ||
-		trimmed.startsWith('#')
-	) {
-		return null;
-	}
+function absolutize(maybeRelative: string, base: string): string | null {
+	if (!maybeRelative) return null;
+	// WHY skip these schemes: data: and blob: are inline content, javascript:
+	// is a no-op in iframes (and dangerous), mailto/tel/etc don't need
+	// proxying.
+	if (/^(data|blob|javascript|mailto|tel|sms|about|chrome):/i.test(maybeRelative)) return null;
+	if (maybeRelative.startsWith('#')) return null;
 	try {
-		return new URL(trimmed, baseUrl).toString();
+		return new URL(maybeRelative, base).toString();
 	} catch {
 		return null;
 	}
 }
 
-/**
- * Rewrite a single attribute-value-style URL. Returns the proxied URL or the
- * original (untouched) string if it shouldn't be rewritten.
- */
-function rewriteAttrUrl(raw: string, baseUrl: string, sessionId: string): string {
-	const abs = absolutize(raw, baseUrl);
-	if (!abs) return raw;
-	return proxify(abs, sessionId);
-}
+// -----------------------------------------------------------------------------
+// HTML rewriting
+// -----------------------------------------------------------------------------
+// WHY regex and not a real parser: Edge runtime can't pull in cheerio/jsdom
+// without massive bundle bloat, and a real parser would also struggle with
+// the malformed HTML you encounter in the wild. The trade-off: we will miss
+// a few exotic cases (HTML inside template strings, weird quoting). The
+// injected runtime script (see injectClientScript) catches dynamic
+// assignments at runtime which covers most of what we miss statically.
+// -----------------------------------------------------------------------------
 
-/**
- * Rewrite an `srcset` attribute. Format: "url1 1x, url2 2x" or "url1 100w, url2 200w".
- * Splits on commas at the top level, then preserves descriptors.
- */
-function rewriteSrcset(value: string, baseUrl: string, sessionId: string): string {
-	return value
-		.split(',')
-		.map((entry) => {
-			const trimmed = entry.trim();
-			if (!trimmed) return entry;
-			// First token is the URL, remainder is the descriptor (e.g. "2x" / "300w")
-			const spaceIdx = trimmed.search(/\s/);
-			const url = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
-			const descriptor = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx);
-			const rewritten = rewriteAttrUrl(url, baseUrl, sessionId);
-			return rewritten + descriptor;
-		})
-		.join(', ');
-}
+function rewriteHtmlAttributes(html: string, base: string, sessionId: string): string {
+	// WHY this exact attribute list: these are every standard attribute that
+	// can issue a network request. `formaction` and `data-src` are added
+	// because they're common in modern SPAs (React lazy images, htmx forms).
+	const attrs = ['src', 'href', 'action', 'formaction', 'data-src', 'poster', 'background'];
 
-/**
- * Rewrite the HTML body so that all sub-resource / link / form URLs route
- * back through us.
- *
- * Why regex and not a real parser:
- *   - We must stay dep-free per project rules (no cheerio/jsdom/htmlparser2).
- *   - HTML proxying is inherently best-effort; even "real" parsers can't
- *     reliably catch URLs constructed at JS runtime. We aim for ~80% coverage.
- *
- * Caveats: we don't try to handle URLs in inline JS strings; that's the job
- * of the injected runtime hook (intercepting fetch / XHR / location).
- */
-function rewriteHtml(html: string, baseUrl: string, sessionId: string): string {
 	let out = html;
-
-	// 1. <base href="..."> — strip; we inject our own further down so relative
-	//    URLs inside the proxied page resolve correctly inside the iframe.
-	out = out.replace(/<base\b[^>]*>/gi, '');
-
-	// 2. Common URL-bearing attributes: src, href, action, poster, data,
-	//    formaction, background. Match attribute value in single or double
-	//    quotes; we deliberately ignore unquoted attrs (rare and risky to regex).
-	out = out.replace(
-		/\b(src|href|action|poster|data|formaction|background)\s*=\s*("([^"]*)"|'([^']*)')/gi,
-		(_full: string, attr: string, _quoted: string, dq: string | undefined, sq: string | undefined) => {
-			const rawUrl = dq ?? sq ?? '';
-			const quote = dq !== undefined ? '"' : "'";
-			const rewritten = rewriteAttrUrl(rawUrl, baseUrl, sessionId);
-			return `${attr}=${quote}${rewritten}${quote}`;
-		}
-	);
-
-	// 3. srcset attribute (comma-separated list of URL + descriptor).
-	out = out.replace(
-		/\bsrcset\s*=\s*("([^"]*)"|'([^']*)')/gi,
-		(_full: string, _quoted: string, dq: string | undefined, sq: string | undefined) => {
-			const raw = dq ?? sq ?? '';
-			const quote = dq !== undefined ? '"' : "'";
-			return `srcset=${quote}${rewriteSrcset(raw, baseUrl, sessionId)}${quote}`;
-		}
-	);
-
-	// 4. url(...) references inside <style> blocks and style="" attributes.
-	out = rewriteCssUrls(out, baseUrl, sessionId);
-
-	// 5. <meta http-equiv="refresh" content="0; url=..."> — rewrite the URL.
-	out = out.replace(
-		/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*("([^"]*)"|'([^']*)')[^>]*>/gi,
-		(full: string, _quoted: string, dq: string | undefined, sq: string | undefined) => {
-			const content = dq ?? sq ?? '';
-			const m = content.match(/^(\s*\d+\s*;\s*url\s*=\s*)(.+)$/i);
-			if (!m) return full;
-			const rewritten = rewriteAttrUrl(m[2], baseUrl, sessionId);
-			const newContent = m[1] + rewritten;
-			return full.replace(content, newContent);
-		}
-	);
-
-	// 6. Inject our <base> and runtime hook script right after <head>, or at
-	//    the very top if there is no <head>.
-	const baseTag = `<base href="${escapeAttr(baseUrl)}">`;
-	const runtimeScript = `<script>${buildRuntimeHook(sessionId)}</script>`;
-	const inject = baseTag + runtimeScript;
-
-	if (/<head\b[^>]*>/i.test(out)) {
-		out = out.replace(/<head\b[^>]*>/i, (m) => m + inject);
-	} else if (/<html\b[^>]*>/i.test(out)) {
-		out = out.replace(/<html\b[^>]*>/i, (m) => m + '<head>' + inject + '</head>');
-	} else {
-		out = inject + out;
+	for (const attr of attrs) {
+		// double-quoted: attr="..."
+		out = out.replace(
+			new RegExp(`(\\s${attr})\\s*=\\s*"([^"]*)"`, 'gi'),
+			(_m, pre: string, val: string) => {
+				const abs = absolutize(val, base);
+				if (!abs) return `${pre}="${val}"`;
+				return `${pre}="${proxify(abs, sessionId)}"`;
+			},
+		);
+		// single-quoted
+		out = out.replace(
+			new RegExp(`(\\s${attr})\\s*=\\s*'([^']*)'`, 'gi'),
+			(_m, pre: string, val: string) => {
+				const abs = absolutize(val, base);
+				if (!abs) return `${pre}='${val}'`;
+				return `${pre}='${proxify(abs, sessionId)}'`;
+			},
+		);
 	}
+
+	// srcset is comma-separated `url descriptor` pairs
+	out = out.replace(/\s(srcset|imagesrcset)\s*=\s*"([^"]*)"/gi, (_m, attr: string, val: string) => {
+		const rewritten = val
+			.split(',')
+			.map((part) => {
+				const trimmed = part.trim();
+				const sp = trimmed.indexOf(' ');
+				const url = sp < 0 ? trimmed : trimmed.slice(0, sp);
+				const desc = sp < 0 ? '' : trimmed.slice(sp);
+				const abs = absolutize(url, base);
+				return (abs ? proxify(abs, sessionId) : url) + desc;
+			})
+			.join(', ');
+		return ` ${attr}="${rewritten}"`;
+	});
+
+	// inline style="...url(...)..."
+	out = out.replace(/\sstyle\s*=\s*"([^"]*)"/gi, (_m, css: string) => {
+		return ` style="${rewriteCssUrls(css, base, sessionId)}"`;
+	});
+
+	// <style>...</style> blocks
+	out = out.replace(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi, (_m, attrsRaw: string, body: string) => {
+		return `<style${attrsRaw}>${rewriteCssUrls(body, base, sessionId)}</style>`;
+	});
+
+	// WHY strip CSP meta tags: even though we strip the *header*, sites also
+	// inject CSP via <meta http-equiv="Content-Security-Policy" ...>. Leaving
+	// these would block our injected client script and most rewritten URLs.
+	out = out.replace(
+		/<meta\b[^>]*http-equiv\s*=\s*["']?content-security-policy["']?[^>]*>/gi,
+		'<!-- CSP meta stripped by proxy -->',
+	);
+
+	// <meta http-equiv="refresh" content="N; url=..."> — rewrite the URL
+	out = out.replace(
+		/(<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'])([^"']*)(["'])/gi,
+		(_m, pre: string, content: string, post: string) => {
+			const match = content.match(/^\s*(\d+)\s*;\s*url\s*=\s*(.*)$/i);
+			if (!match) return pre + content + post;
+			const abs = absolutize(match[2].trim(), base);
+			if (!abs) return pre + content + post;
+			return `${pre}${match[1]}; url=${proxify(abs, sessionId)}${post}`;
+		},
+	);
 
 	return out;
 }
 
-/** Rewrite `url(...)` references in a CSS body (or HTML with embedded CSS). */
-function rewriteCssUrls(css: string, baseUrl: string, sessionId: string): string {
-	return css.replace(
-		/url\(\s*("([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi,
-		(full: string, _quoted: string, dq: string | undefined, sq: string | undefined, bare: string | undefined) => {
-			const raw = (dq ?? sq ?? bare ?? '').trim();
-			if (!raw) return full;
-			const rewritten = rewriteAttrUrl(raw, baseUrl, sessionId);
-			return `url("${rewritten}")`;
+function rewriteCssUrls(css: string, base: string, sessionId: string): string {
+	return css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (_m, quote: string, url: string) => {
+		const abs = absolutize(url, base);
+		if (!abs) return `url(${quote}${url}${quote})`;
+		return `url(${quote}${proxify(abs, sessionId)}${quote})`;
+	});
+}
+
+// -----------------------------------------------------------------------------
+// Client-side runtime injection
+// -----------------------------------------------------------------------------
+// WHY we wrap setAttribute, fetch, XHR, history, window.open: modern SPAs
+// (React, Vue, Svelte) assemble URLs in JS at runtime. Static HTML rewriting
+// only catches the initial server-rendered markup; everything else gets set
+// programmatically and would bypass the proxy. By patching the global APIs
+// we intercept those late assignments and re-route them.
+//
+// The script also posts navigation events to the parent window so the Edge
+// app can update its address bar and title.
+// -----------------------------------------------------------------------------
+
+function injectClientScript(html: string, targetOrigin: string, sessionId: string): string {
+	const safeSession = JSON.stringify(sessionId);
+	const safeOrigin = JSON.stringify(targetOrigin);
+
+	const script = `<script>(function(){
+		var SESSION = ${safeSession};
+		var ORIGIN = ${safeOrigin};
+		function proxify(u){
+			try {
+				if (!u) return u;
+				if (typeof u !== 'string') u = String(u);
+				if (u.indexOf('/api/proxy') === 0) return u;
+				if (/^(data|blob|javascript|mailto|tel|about):/i.test(u)) return u;
+				if (u.charAt(0) === '#') return u;
+				var abs = new URL(u, ORIGIN).toString();
+				return '/api/proxy?url=' + encodeURIComponent(abs) + '&session=' + encodeURIComponent(SESSION);
+			} catch(e) { return u; }
 		}
-	);
+		// WHY a try-around-each-patch: if a browser quirk makes one patch throw
+		// we still install the rest. Failing closed would break the whole page.
+		try {
+			var origFetch = window.fetch;
+			window.fetch = function(input, init){
+				if (typeof input === 'string') return origFetch(proxify(input), init);
+				if (input && input.url) {
+					try { return origFetch(new Request(proxify(input.url), input), init); }
+					catch(e) { return origFetch(input, init); }
+				}
+				return origFetch(input, init);
+			};
+		} catch(e){}
+		try {
+			var origOpen = XMLHttpRequest.prototype.open;
+			XMLHttpRequest.prototype.open = function(method, url){
+				arguments[1] = proxify(url);
+				return origOpen.apply(this, arguments);
+			};
+		} catch(e){}
+		try {
+			var origWinOpen = window.open;
+			window.open = function(url, name, features){
+				return origWinOpen.call(window, proxify(url), name, features);
+			};
+		} catch(e){}
+		// WHY setAttribute: React often does \`el.setAttribute('src', dynamicUrl)\`
+		// for late-bound images, scripts, iframes. Without this, those late
+		// requests escape the proxy.
+		try {
+			var origSet = Element.prototype.setAttribute;
+			Element.prototype.setAttribute = function(name, value){
+				var lower = (name + '').toLowerCase();
+				if (lower === 'src' || lower === 'href' || lower === 'action' || lower === 'formaction' || lower === 'poster') {
+					value = proxify(value);
+				}
+				return origSet.call(this, name, value);
+			};
+		} catch(e){}
+		// WHY history wrapping: SPA route changes go through pushState/replaceState
+		// rather than full navigations. We post these to the parent so the
+		// address bar in the Edge app stays in sync.
+		try {
+			var origPush = history.pushState;
+			history.pushState = function(s, t, u){
+				try { parent.postMessage({ __edge: true, type: 'nav', url: u ? new URL(u, ORIGIN).toString() : location.href }, '*'); } catch(e){}
+				return origPush.apply(this, arguments);
+			};
+			var origReplace = history.replaceState;
+			history.replaceState = function(s, t, u){
+				try { parent.postMessage({ __edge: true, type: 'nav', url: u ? new URL(u, ORIGIN).toString() : location.href }, '*'); } catch(e){}
+				return origReplace.apply(this, arguments);
+			};
+		} catch(e){}
+		window.addEventListener('DOMContentLoaded', function(){
+			try {
+				parent.postMessage({ __edge: true, type: 'loaded', url: ORIGIN, title: document.title }, '*');
+			} catch(e){}
+		});
+		window.addEventListener('error', function(e){
+			try {
+				parent.postMessage({ __edge: true, type: 'error', message: (e && e.message) || 'error' }, '*');
+			} catch(e){}
+		}, true);
+	})();</script>`;
+
+	// WHY <base href>: collapses any leftover relative URLs we didn't catch
+	// (e.g. inside inline event handlers like onclick="location='foo'") down
+	// to the target origin. The injected fetch wrapper then catches them.
+	// Also: we use the EXACT target origin (scheme+host+port) so the browser
+	// resolves relative paths against the real site, not the proxy host.
+	const baseTag = `<base href="${escapeHtmlAttr(targetOrigin)}/">`;
+
+	// Inject right after the opening <head>, or fall back to right after <html>,
+	// or just prepend if neither exists.
+	if (/<head\b[^>]*>/i.test(html)) {
+		return html.replace(/(<head\b[^>]*>)/i, `$1${baseTag}${script}`);
+	}
+	if (/<html\b[^>]*>/i.test(html)) {
+		return html.replace(/(<html\b[^>]*>)/i, `$1<head>${baseTag}${script}</head>`);
+	}
+	return `<head>${baseTag}${script}</head>${html}`;
 }
 
-function escapeAttr(s: string): string {
-	return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+function escapeHtmlAttr(s: string): string {
+	return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }
 
-// ---------------------------------------------------------------------------
-// Runtime hook injected into every proxied HTML page.
-// Plain JS string — we deliberately avoid eval/Function constructors. The
-// browser parses this as part of the HTML.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Response header sanitisation
+// -----------------------------------------------------------------------------
+// WHY we strip these specifically:
+//   x-frame-options:       blocks rendering the page inside our iframe.
+//   content-security-policy (and -report-only): the page's CSP would forbid
+//                          our injected inline <script>, plus any cross-origin
+//                          requests to /api/proxy (which is technically the
+//                          same origin from the iframe's POV but CSP applies
+//                          to the document URL the browser saw).
+//   cross-origin-*-policy: COOP/COEP/CORP will refuse to load us inside the
+//                          parent window or block subresources.
+//   permissions-policy:    can disable features (clipboard, fullscreen) we
+//                          want to expose.
+//   strict-transport-security: irrelevant for the proxied response and
+//                          would mistakenly upgrade our HTTP-served dev
+//                          environment.
+//   content-encoding/transfer-encoding: dropped because the upstream body is
+//                          already decoded by `fetch` — leaving these would
+//                          confuse the browser.
+//   content-length:        invalid after we mutate the body.
+// -----------------------------------------------------------------------------
 
-function buildRuntimeHook(sessionId: string): string {
-	// IIFE; uses simple ES5+ constructs. The single placeholder is the session id.
-	return `
-(function(){
-	var SESSION=${JSON.stringify(sessionId)};
-	function proxify(u){
-		try{
-			if(!u) return u;
-			var s=String(u);
-			if(s.indexOf('/api/proxy?url=')===0) return s;
-			if(s.indexOf('data:')===0||s.indexOf('blob:')===0||s.indexOf('javascript:')===0||s.indexOf('mailto:')===0||s.indexOf('about:')===0||s[0]==='#') return s;
-			var abs=new URL(s, document.baseURI).toString();
-			return '/api/proxy?url='+encodeURIComponent(abs)+'&session='+encodeURIComponent(SESSION);
-		}catch(e){return u;}
-	}
-	function notifyNav(url){
-		try{ window.parent && window.parent.postMessage({source:'edge-proxy', type:'navigate', url:url}, '*'); }catch(e){}
-	}
-	// Patch fetch
-	if(typeof fetch==='function'){
-		var origFetch=fetch;
-		window.fetch=function(input, init){
-			try{
-				if(typeof input==='string'){ input=proxify(input); }
-				else if(input && input.url){ input=new Request(proxify(input.url), input); }
-			}catch(e){}
-			return origFetch.call(this, input, init);
-		};
-	}
-	// Patch XHR
-	if(window.XMLHttpRequest){
-		var origOpen=XMLHttpRequest.prototype.open;
-		XMLHttpRequest.prototype.open=function(method, url){
-			arguments[1]=proxify(url);
-			return origOpen.apply(this, arguments);
-		};
-	}
-	// Patch location.assign / replace — best effort.
-	// Direct \`location.href = "..."\` is hard to intercept on the location
-	// object itself (it's an exotic object), so we also catch clicks below.
-	try{
-		var origAssign=window.location.assign.bind(window.location);
-		var origReplace=window.location.replace.bind(window.location);
-		window.location.assign=function(u){ var p=proxify(u); notifyNav(u); origAssign(p); };
-		window.location.replace=function(u){ var p=proxify(u); notifyNav(u); origReplace(p); };
-	}catch(e){}
-	// history.pushState / replaceState — keep the iframe URL synced with parent.
-	var origPush=history.pushState, origRepl=history.replaceState;
-	history.pushState=function(){ try{ notifyNav(arguments[2]||location.href); }catch(e){} return origPush.apply(this, arguments); };
-	history.replaceState=function(){ try{ notifyNav(arguments[2]||location.href); }catch(e){} return origRepl.apply(this, arguments); };
-	// Capture link clicks (target=_self) so we can post to parent before navigation.
-	document.addEventListener('click', function(e){
-		var a=e.target && e.target.closest && e.target.closest('a[href]');
-		if(!a) return;
-		var href=a.getAttribute('href');
-		if(!href) return;
-		notifyNav(href);
-	}, true);
-	// Initial load — tell the parent which URL we're showing.
-	window.addEventListener('load', function(){ notifyNav(location.href); });
-	// Block window.open from spawning an unproxied tab; rewrite to proxy and notify.
-	var origOpen2=window.open;
-	window.open=function(u){ var p=proxify(u); notifyNav(u); return origOpen2.call(this, p); };
-})();
-`;
-}
-
-// ---------------------------------------------------------------------------
-// Header filtering.
-// We strip headers from the upstream response that would prevent the page
-// from rendering inside our iframe (X-Frame-Options blocks framing; CSP can
-// block inline scripts including our hook; COOP/CORP block cross-origin
-// resource use). This is the core trade-off of building a "browse anything"
-// proxy and the user has accepted it.
-// ---------------------------------------------------------------------------
-
-const BLOCKED_RESPONSE_HEADERS = new Set([
+const STRIP_HEADERS = new Set([
 	'x-frame-options',
 	'content-security-policy',
 	'content-security-policy-report-only',
-	'cross-origin-resource-policy',
 	'cross-origin-opener-policy',
 	'cross-origin-embedder-policy',
+	'cross-origin-resource-policy',
 	'permissions-policy',
-	'feature-policy',
-	// strip transport-related headers — the platform sets these itself
+	'strict-transport-security',
 	'content-encoding',
-	'content-length',
 	'transfer-encoding',
-	'connection',
+	'content-length',
 ]);
 
-// Vercel Web Standard handler. Request/Response are globals.
-export default async function handler(req: Request): Promise<Response> {
-	const corsHeaders: Record<string, string> = {
-		'Access-Control-Allow-Origin': '*',
-		'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-		'Access-Control-Allow-Headers': '*',
-	};
+function sanitiseHeaders(upstream: Headers): Headers {
+	const out = new Headers();
+	upstream.forEach((value, key) => {
+		if (STRIP_HEADERS.has(key.toLowerCase())) return;
+		// WHY skip set-cookie here: cookies are stored in our jar, not relayed
+		// to the browser. If we relayed them, they'd be set on OUR domain
+		// (because that's what the iframe sees), which is wrong and also
+		// would mix sessions across users sharing the deployment.
+		if (key.toLowerCase() === 'set-cookie') return;
+		out.set(key, value);
+	});
+	out.set('access-control-allow-origin', '*');
+	return out;
+}
 
+// -----------------------------------------------------------------------------
+// Main handler
+// -----------------------------------------------------------------------------
+
+export default async function handler(req: Request): Promise<Response> {
+	const url = new URL(req.url);
+
+	// CORS preflight
 	if (req.method === 'OPTIONS') {
-		return new Response(null, { status: 204, headers: corsHeaders });
+		return new Response(null, {
+			status: 204,
+			headers: {
+				'access-control-allow-origin': '*',
+				'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
+				'access-control-allow-headers': '*',
+				'access-control-max-age': '86400',
+			},
+		});
 	}
 
-	const reqUrl = new URL(req.url);
-	const targetParam = reqUrl.searchParams.get('url');
-	const sessionId = reqUrl.searchParams.get('session') || 'default';
+	const sessionId = url.searchParams.get('session') || 'default';
 
-	if (!targetParam) {
-		return errorPage(400, 'Missing url parameter', 'No target URL was specified.', corsHeaders);
+	// DELETE /api/proxy?session=X — clear the cookie jar for that session
+	if (req.method === 'DELETE') {
+		clearJar(sessionId);
+		publish(sessionId, { type: 'jar-cleared' });
+		return new Response(JSON.stringify({ ok: true }), {
+			status: 200,
+			headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' },
+		});
+	}
+
+	const target = url.searchParams.get('url');
+	if (!target) {
+		return new Response('Missing ?url=', { status: 400 });
 	}
 
 	let targetUrl: URL;
 	try {
-		targetUrl = new URL(targetParam);
+		targetUrl = new URL(target);
 	} catch {
-		return errorPage(400, 'Invalid URL', 'The provided URL could not be parsed.', corsHeaders);
+		return new Response('Invalid target URL', { status: 400 });
 	}
-
 	if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
-		return errorPage(400, 'Unsupported protocol', `Only http: and https: are supported (got ${targetUrl.protocol}).`, corsHeaders);
+		return new Response('Only http(s) supported', { status: 400 });
 	}
 
-	// Build upstream request headers.
-	const reqHeaders: Record<string, string> = {
-		'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 EdgeProxy/1.0',
-		'Accept': req.headers.get('accept') || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-		'Accept-Language': req.headers.get('accept-language') || 'en-US,en;q=0.9',
-		// Ask for uncompressed responses so we can safely rewrite. undici's
-		// fetch handles decompression automatically but being explicit avoids
-		// edge cases where a Content-Encoding header survives.
-		'Accept-Encoding': 'identity',
-	};
-	const storedCookies = getCookies(sessionId, targetUrl.origin);
-	if (storedCookies) reqHeaders['Cookie'] = storedCookies;
+	// -------------------------------------------------------------------------
+	// Build upstream request headers
+	// -------------------------------------------------------------------------
+	const upstreamHeaders = new Headers();
+	// WHY pick-not-pass: forwarding ALL incoming headers leaks our deployment
+	// host, vercel cookies, and CDN markers into the upstream — many sites
+	// then 403. Whitelist only what's load-bearing for a real browser fetch.
+	const passthrough = ['accept', 'accept-language', 'user-agent', 'content-type'];
+	for (const name of passthrough) {
+		const v = req.headers.get(name);
+		if (v) upstreamHeaders.set(name, v);
+	}
+	// WHY a desktop UA: many sites serve degraded mobile HTML or block unknown
+	// UAs entirely.
+	if (!upstreamHeaders.has('user-agent')) {
+		upstreamHeaders.set(
+			'user-agent',
+			'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+		);
+	}
+	// WHY Referer = target origin: sites use Referer for CSRF protection and
+	// hotlink prevention. Sending the actual upstream origin keeps us looking
+	// like a same-site navigation.
+	upstreamHeaders.set('referer', targetUrl.origin + '/');
+	upstreamHeaders.set('origin', targetUrl.origin);
 
-	// Forward request body for non-GET/HEAD methods.
-	let body: BodyInit | undefined;
-	const method = (req.method || 'GET').toUpperCase();
-	if (method !== 'GET' && method !== 'HEAD') {
-		const buf = await req.arrayBuffer();
-		if (buf.byteLength > 0) body = buf;
-		const ct = req.headers.get('content-type');
-		if (ct) reqHeaders['Content-Type'] = ct;
+	// Attach stored cookies
+	const cookieHeader = buildCookieHeader(sessionId, targetUrl.hostname, targetUrl.pathname);
+	if (cookieHeader) upstreamHeaders.set('cookie', cookieHeader);
+
+	// -------------------------------------------------------------------------
+	// Body forwarding
+	// -------------------------------------------------------------------------
+	// WHY null body for GET/HEAD: Edge runtime throws if you pass a body for
+	// these methods. Also: req.body is a ReadableStream — passing it directly
+	// keeps memory bounded for large POSTs.
+	let body: BodyInit | null = null;
+	if (req.method !== 'GET' && req.method !== 'HEAD') {
+		body = req.body;
 	}
 
+	// -------------------------------------------------------------------------
+	// Fetch upstream — with manual redirect handling so we can re-proxify
+	// the Location header. Returning the upstream Location directly would
+	// send the browser away from /api/proxy and break the iframe.
+	// -------------------------------------------------------------------------
 	let upstream: Response;
 	try {
-		// Abort if upstream takes too long; cap below maxDuration so we have
-		// time to rewrite and stream HTML back.
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), 25_000);
-		try {
-			upstream = await fetch(targetUrl.toString(), {
-				method,
-				headers: reqHeaders,
-				body,
-				redirect: 'manual',
-				signal: controller.signal,
-			});
-		} finally {
-			clearTimeout(timer);
-		}
-	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		return errorPage(502, 'Upstream fetch failed', `Could not reach ${targetUrl.host}: ${msg}`, corsHeaders);
+		upstream = await fetch(targetUrl.toString(), {
+			method: req.method,
+			headers: upstreamHeaders,
+			body,
+			redirect: 'manual',
+			// WHY duplex: 'half': Edge runtime requires this when streaming a
+			// request body. Without it, fetch throws on POSTs.
+			// @ts-expect-error -- duplex is part of the Edge fetch spec, not in lib.dom yet.
+			duplex: 'half',
+		});
+	} catch (err: any) {
+		publish(sessionId, { type: 'error', message: String(err?.message ?? err) });
+		return new Response(`Upstream fetch failed: ${String(err?.message ?? err)}`, {
+			status: 502,
+			headers: { 'access-control-allow-origin': '*' },
+		});
 	}
 
-	// Persist Set-Cookie before we filter headers.
-	// undici's Headers exposes getSetCookie() in Node >=20.
-	const upstreamHeadersAny = upstream.headers as unknown as { getSetCookie?: () => string[] };
-	const setCookieList: string[] = typeof upstreamHeadersAny.getSetCookie === 'function'
-		? upstreamHeadersAny.getSetCookie()
-		: (() => {
-			const acc: string[] = [];
-			upstream.headers.forEach((v, k) => { if (k.toLowerCase() === 'set-cookie') acc.push(v); });
-			return acc;
-		})();
-	if (setCookieList.length) storeSetCookie(sessionId, targetUrl.origin, setCookieList);
+	// -------------------------------------------------------------------------
+	// Capture Set-Cookie BEFORE we sanitise the headers (sanitise drops it)
+	// -------------------------------------------------------------------------
+	// WHY headers.getSetCookie(): Set-Cookie can appear multiple times and
+	// canonical Headers.get() folds them with commas — which corrupts
+	// expires=Wed, 01 Jan 2025 ... values. getSetCookie() returns the array.
+	const setCookies: string[] = (upstream.headers as any).getSetCookie
+		? (upstream.headers as any).getSetCookie()
+		: [];
+	if (setCookies.length > 0) {
+		const changed = storeCookies(sessionId, targetUrl.hostname, setCookies);
+		publish(sessionId, { type: 'cookie', host: targetUrl.hostname, names: changed });
+	}
 
-	// Handle redirects ourselves: rewrite Location and pass through as 302
-	// so the iframe's navigation stays under our origin.
+	// -------------------------------------------------------------------------
+	// Handle 3xx server-side — chase the redirect through the proxy
+	// -------------------------------------------------------------------------
 	if (upstream.status >= 300 && upstream.status < 400) {
 		const loc = upstream.headers.get('location');
 		if (loc) {
 			const abs = absolutize(loc, targetUrl.toString());
 			if (abs) {
+				publish(sessionId, { type: 'redirect', from: targetUrl.toString(), to: abs });
+				// WHY 302 with proxified Location (instead of HTML refresh): keeps
+				// fetch()/XHR clients working too, not just iframe navigations.
 				return new Response(null, {
 					status: 302,
-					headers: { ...corsHeaders, Location: proxify(abs, sessionId) },
+					headers: {
+						location: proxify(abs, sessionId),
+						'access-control-allow-origin': '*',
+					},
 				});
 			}
 		}
 	}
 
-	// Build the response header set, dropping headers that would break framing.
-	const outHeaders = new Headers();
-	for (const [k, v] of corsHeaders as unknown as Iterable<[string, string]>) outHeaders.set(k, v);
-	upstream.headers.forEach((value, key) => {
-		const lk = key.toLowerCase();
-		if (BLOCKED_RESPONSE_HEADERS.has(lk)) return;
-		if (lk === 'set-cookie') return; // we handle cookies server-side
-		if (lk === 'location') return; // already handled above
-		try { outHeaders.set(key, value); } catch { /* invalid header — skip */ }
-	});
-
+	const headers = sanitiseHeaders(upstream.headers);
 	const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
 
+	// -------------------------------------------------------------------------
+	// HTML: read fully, rewrite, inject runtime, return as text
+	// -------------------------------------------------------------------------
 	if (contentType.includes('text/html')) {
 		const text = await upstream.text();
-		const rewritten = rewriteHtml(text, targetUrl.toString(), sessionId);
-		outHeaders.set('Content-Type', 'text/html; charset=utf-8');
-		return new Response(rewritten, { status: upstream.status, headers: outHeaders });
+		let rewritten = rewriteHtmlAttributes(text, targetUrl.toString(), sessionId);
+		rewritten = injectClientScript(rewritten, targetUrl.origin, sessionId);
+		headers.set('content-type', 'text/html; charset=utf-8');
+		return new Response(rewritten, { status: upstream.status, headers });
 	}
 
+	// -------------------------------------------------------------------------
+	// CSS: read fully, rewrite url() refs
+	// -------------------------------------------------------------------------
 	if (contentType.includes('text/css')) {
 		const text = await upstream.text();
 		const rewritten = rewriteCssUrls(text, targetUrl.toString(), sessionId);
-		outHeaders.set('Content-Type', 'text/css; charset=utf-8');
-		return new Response(rewritten, { status: upstream.status, headers: outHeaders });
+		headers.set('content-type', 'text/css; charset=utf-8');
+		return new Response(rewritten, { status: upstream.status, headers });
 	}
 
-	// Pass-through for everything else (images, fonts, JS, JSON, binary).
-	const buf = await upstream.arrayBuffer();
-	return new Response(buf, { status: upstream.status, headers: outHeaders });
-}
-
-function errorPage(status: number, title: string, detail: string, baseHeaders: Record<string, string>): Response {
-	const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-<style>
-body{font-family:Segoe UI,system-ui,sans-serif;max-width:560px;margin:80px auto;padding:0 24px;color:#202020;background:#fafafa}
-h1{font-size:22px;font-weight:600;margin:0 0 12px}
-p{font-size:14px;line-height:1.6;color:#444}
-.code{display:inline-block;padding:2px 8px;background:#eee;border-radius:4px;font-family:Consolas,monospace;font-size:12px}
-</style></head><body>
-<h1>${escapeHtml(title)}</h1>
-<p>${escapeHtml(detail)}</p>
-<p><span class="code">HTTP ${status}</span></p>
-</body></html>`;
-	return new Response(html, {
-		status,
-		headers: { ...baseHeaders, 'Content-Type': 'text/html; charset=utf-8' },
-	});
-}
-
-function escapeHtml(s: string): string {
-	return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+	// -------------------------------------------------------------------------
+	// Everything else (JS, images, fonts, video, etc.): stream the body
+	// straight through. Edge runtime forwards ReadableStream without
+	// buffering, which is critical for video/audio and large assets.
+	// -------------------------------------------------------------------------
+	// WHY not .text() for binary: would decode bytes as UTF-8 and corrupt
+	// images/fonts/wasm. Streaming the body preserves the bytes exactly.
+	return new Response(upstream.body, { status: upstream.status, headers });
 }

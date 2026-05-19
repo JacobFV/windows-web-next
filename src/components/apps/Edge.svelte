@@ -1,474 +1,722 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { writeFile } from '../../state/vfs.svelte';
+	import { notify } from '../../state/notifications.svelte';
 	import { copyText } from '../../state/clipboard.svelte';
-	import { consumePendingFile } from '../../state/file-opener.svelte';
 
-	/**
-	 * The real-browser Edge app. Renders an <iframe> pointed at our
-	 * `/api/proxy` Vercel function, which fetches the requested URL
-	 * server-side, rewrites HTML/CSS/asset URLs to route back through us,
-	 * and persists cookies per `sessionId`. See `api/proxy.ts` for details.
-	 *
-	 * Each tab has its own UUID `sessionId` (kept in localStorage) so
-	 * cookies in different tabs are isolated, mirroring real browser tabs.
-	 *
-	 * Limits inherited from the proxy: WebSockets won't work, sites with
-	 * strict CSP/anti-bot may partially break, and the per-instance cookie
-	 * jar may "drop" between Vercel invocations.
-	 */
+	interface HistoryEntry {
+		url: string;
+		title: string;
+		favicon: string;
+		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
+	}
 
 	interface Tab {
-		id: string;
-		url: string; // empty = new-tab page
+		id: number;
 		title: string;
-		history: string[];
-		historyIndex: number;
-		sessionId: string;
-		loading: boolean;
-	}
-
-	interface Bookmark {
-		label: string;
 		url: string;
-		icon: string;
+		favicon: string;
+		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
+		searchQuery: string;
+		historyStack: HistoryEntry[];
+		historyIndex: number;
+		pageContent: { title: string; domain: string; body: string } | null;
+		// Per-tab proxy session. Cookies in the jar (server-side) are scoped
+		// to this id, so closing a tab effectively logs out of any sites
+		// browsed in it. Generated once on tab creation.
+		sessionId: string;
+		// The currently displayed proxied URL (the target, NOT the
+		// /api/proxy?url=... wrapper). Used as the iframe src input.
+		proxyTarget: string | null;
+		// Tracks whether the SSE channel for this tab has reported a hard
+		// error (e.g. the /api/session endpoint is unreachable). The UI
+		// downgrades to a non-interactive status indicator when true.
+		proxyStreamError: boolean;
 	}
 
-	const DEFAULT_BOOKMARKS: Bookmark[] = [
-		{ label: 'Wikipedia', url: 'https://en.wikipedia.org', icon: '📚' },
-		{ label: 'GitHub', url: 'https://github.com', icon: '🐱' },
-		{ label: 'MDN', url: 'https://developer.mozilla.org', icon: '📖' },
-		{ label: 'Hacker News', url: 'https://news.ycombinator.com', icon: '📰' },
-		{ label: 'Google', url: 'https://www.google.com', icon: '🔍' },
-		{ label: 'YouTube', url: 'https://www.youtube.com', icon: '▶️' },
-	];
+	// WHY postMessage origin '*': the iframe document is served from the same
+	// origin as the parent (both come from /api/proxy on our deployment), so
+	// the browser already considers them same-origin. But during local dev the
+	// iframe sees `http://localhost:5173` while messages may originate from
+	// the proxied content's <base href>; '*' avoids the false-negative drop
+	// while we filter on { __edge: true } in the listener.
 
-	const TABS_STORAGE_KEY = 'windows-web:edge:tabs';
-	const BOOKMARKS_STORAGE_KEY = 'windows-web:edge:bookmarks';
-	const WARNING_DISMISSED_KEY = 'windows-web:edge:warning-dismissed';
-
-	function makeSessionId(): string {
-		if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-			return crypto.randomUUID();
+	// Generate a stable-ish session id. WHY crypto.randomUUID with fallback:
+	// older browsers / non-secure contexts don't expose it.
+	function newSessionId(): string {
+		try {
+			if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+				return (crypto as any).randomUUID();
+			}
+		} catch {
+			/* fallthrough */
 		}
 		return 'sess-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
 	}
 
-	function newTab(): Tab {
-		return {
-			id: makeSessionId(),
-			url: '',
-			title: 'New Tab',
-			history: [],
-			historyIndex: -1,
-			sessionId: makeSessionId(),
-			loading: false,
-		};
-	}
-
-	let tabs = $state<Tab[]>([newTab()]);
-	let activeTabId = $state<string>(tabs[0].id);
-	let bookmarks = $state<Bookmark[]>([...DEFAULT_BOOKMARKS]);
-	let addressValue = $state('');
-	let addressInputRef = $state<HTMLInputElement | null>(null);
-	let iframeRefs = $state<Record<string, HTMLIFrameElement | null>>({});
-	let showWarning = $state(false);
-	let showBookmarkPrompt = $state(false);
-
-	const activeTab = $derived(tabs.find((t) => t.id === activeTabId) ?? tabs[0]);
-	const canGoBack = $derived(activeTab ? activeTab.historyIndex > 0 : false);
-	const canGoForward = $derived(
-		activeTab ? activeTab.historyIndex < activeTab.history.length - 1 : false
-	);
-
-	function proxyUrl(target: string, sessionId: string): string {
+	function buildProxyUrl(target: string, sessionId: string): string {
 		return `/api/proxy?url=${encodeURIComponent(target)}&session=${encodeURIComponent(sessionId)}`;
 	}
 
-	function looksLikeUrl(input: string): boolean {
-		const trimmed = input.trim();
-		if (!trimmed) return false;
-		if (/^https?:\/\//i.test(trimmed)) return true;
-		// "domain.tld" or "domain.tld/path" — must contain a dot and no spaces.
-		if (!/\s/.test(trimmed) && /\.[a-z]{2,}/i.test(trimmed)) return true;
-		return false;
+	// Map of tab id -> EventSource. Kept outside reactive state because
+	// EventSource is non-serialisable and Svelte deep-proxying it causes
+	// "Illegal invocation" errors on its native methods.
+	const tabStreams: Map<number, EventSource> = new Map();
+
+	let tabs = $state<Tab[]>([
+		{
+			id: 1,
+			title: 'New Tab',
+			url: 'edge://newtab',
+			favicon: '🏠',
+			contentType: 'newtab',
+			searchQuery: '',
+			historyStack: [{ url: 'edge://newtab', title: 'New Tab', favicon: '🏠', contentType: 'newtab' }],
+			historyIndex: 0,
+			pageContent: null,
+			sessionId: newSessionId(),
+			proxyTarget: null,
+			proxyStreamError: false,
+		},
+	]);
+	let activeTabId = $state(1);
+	let nextTabId = $state(2);
+	let addressValue = $state('');
+	let showCollections = $state(false);
+	let showSettingsMenu = $state(false);
+	let isLoading = $state(false);
+	let loadingProgress = $state(0);
+	let addressInputRef = $state<HTMLInputElement | null>(null);
+
+	let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
+	let canGoBack = $derived(activeTab ? activeTab.historyIndex > 0 : false);
+	let canGoForward = $derived(
+		activeTab ? activeTab.historyIndex < activeTab.historyStack.length - 1 : false
+	);
+
+	function createNewTab(): Tab {
+		const id = nextTabId;
+		nextTabId++;
+		return {
+			id,
+			title: 'New Tab',
+			url: 'edge://newtab',
+			favicon: '🏠',
+			contentType: 'newtab',
+			searchQuery: '',
+			historyStack: [
+				{ url: 'edge://newtab', title: 'New Tab', favicon: '🏠', contentType: 'newtab' },
+			],
+			historyIndex: 0,
+			pageContent: null,
+			sessionId: newSessionId(),
+			proxyTarget: null,
+			proxyStreamError: false,
+		};
 	}
 
-	function normalizeUrl(input: string): string {
-		const trimmed = input.trim();
-		if (looksLikeUrl(trimmed)) {
-			return /^https?:\/\//i.test(trimmed) ? trimmed : 'https://' + trimmed;
+	// WHY a single shared message listener (not one per iframe): the iframe
+	// only exposes its source via the MessageEvent, and we look up the right
+	// tab by iterating. Adding/removing listeners on every src change leaks
+	// handlers and races. Installed once on mount, removed on unmount.
+	function handleIframeMessage(e: MessageEvent) {
+		const data = e.data;
+		if (!data || typeof data !== 'object' || (data as any).__edge !== true) return;
+		// Find the tab whose iframe sent this. We can't trust e.source across
+		// reloads (the contentWindow reference changes), so we apply the
+		// event to the *active* tab — which is the only one the user could
+		// have been interacting with.
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab || tab.contentType !== 'proxy') return;
+
+		if ((data as any).type === 'nav' && typeof (data as any).url === 'string') {
+			// Soft URL update — don't push a history entry for every pushState,
+			// just reflect the new URL in the address bar.
+			tab.url = (data as any).url;
+			tab.proxyTarget = (data as any).url;
+			if (activeTabId === tab.id) addressValue = tab.url;
+			tabs = tabs;
+		} else if ((data as any).type === 'loaded') {
+			if (typeof (data as any).title === 'string' && (data as any).title) {
+				tab.title = (data as any).title;
+				tabs = tabs;
+			}
+		} else if ((data as any).type === 'error') {
+			// Non-fatal — runtime JS errors inside the proxied page. We log
+			// but don't surface, otherwise every site spams the status bar.
+			// console.debug('[edge proxy] page error:', data);
 		}
-		// Treat as search query — Google.
-		return `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`;
 	}
 
-	function navigateActive(target: string) {
-		const tab = activeTab;
-		if (!tab) return;
-		const url = normalizeUrl(target);
-		// Trim forward history when navigating to something new.
-		tab.history = tab.history.slice(0, tab.historyIndex + 1);
-		tab.history.push(url);
-		tab.historyIndex = tab.history.length - 1;
-		tab.url = url;
-		tab.title = hostnameOrUrl(url);
-		tab.loading = true;
-		addressValue = url;
-		tabs = tabs;
-		persistTabs();
-	}
-
-	function navigateActiveFromIframe(href: string) {
-		// Called when the injected script in the proxied page tells us about
-		// an in-page navigation. We don't want to reset iframe.src (the iframe
-		// already navigated) — just update history.
-		const tab = activeTab;
-		if (!tab) return;
-		// Resolve relative to the tab's current URL if needed.
-		let abs: string;
+	// WHY tear-down on tab close (not just on unmount): each EventSource keeps
+	// an open HTTP/2 stream against /api/session. Leaving them open after a
+	// tab closes wastes server-side function-invocation budget and triggers
+	// browser connection-limit throttling after ~6 tabs.
+	function openSessionStream(tab: Tab) {
+		closeSessionStream(tab.id);
+		let es: EventSource;
 		try {
-			abs = new URL(href, tab.url || 'https://example.com').toString();
+			es = new EventSource(`/api/session?session=${encodeURIComponent(tab.sessionId)}`);
 		} catch {
-			abs = href;
+			tab.proxyStreamError = true;
+			return;
 		}
-		if (abs === tab.url) return; // no-op
-		tab.history = tab.history.slice(0, tab.historyIndex + 1);
-		tab.history.push(abs);
-		tab.historyIndex = tab.history.length - 1;
-		tab.url = abs;
-		tab.title = hostnameOrUrl(abs);
-		addressValue = abs;
-		tabs = tabs;
-		persistTabs();
+		// Generic listeners. EventSource fires 'message' for events without an
+		// explicit `event:` field and named events for the rest.
+		es.addEventListener('open', () => {
+			tab.proxyStreamError = false;
+			tabs = tabs;
+		});
+		es.addEventListener('cookie', () => {
+			// Could surface a "cookies set" indicator if desired.
+		});
+		es.addEventListener('redirect', () => {
+			// The iframe will follow the 302 itself; nothing to do here.
+		});
+		es.addEventListener('error', () => {
+			// EventSource fires 'error' both for transient blips (it
+			// auto-reconnects) and for fatal closes (readyState === CLOSED).
+			// Only flag the latter.
+			if (es.readyState === EventSource.CLOSED) {
+				tab.proxyStreamError = true;
+				tabs = tabs;
+			}
+		});
+		tabStreams.set(tab.id, es);
 	}
 
-	function hostnameOrUrl(url: string): string {
-		try { return new URL(url).hostname; } catch { return url; }
+	function closeSessionStream(tabId: number) {
+		const es = tabStreams.get(tabId);
+		if (es) {
+			try { es.close(); } catch { /* noop */ }
+			tabStreams.delete(tabId);
+		}
+	}
+
+	function refreshProxySession() {
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		// Fire-and-forget DELETE — the proxy clears its in-memory jar for
+		// this session id. If it fails (e.g. offline) we still rotate the
+		// session id below, which has the same client-visible effect.
+		fetch(`/api/proxy?session=${encodeURIComponent(tab.sessionId)}`, { method: 'DELETE' }).catch(() => {});
+		closeSessionStream(tab.id);
+		tab.sessionId = newSessionId();
+		tab.proxyStreamError = false;
+		openSessionStream(tab);
+		if (tab.contentType === 'proxy' && tab.proxyTarget) {
+			// Force-reload the iframe at the new session id.
+			refresh();
+		}
+		tabs = tabs;
 	}
 
 	function addTab() {
-		const t = newTab();
-		tabs = [...tabs, t];
-		activeTabId = t.id;
+		if (tabs.length >= 5) return;
+		const newTab = createNewTab();
+		tabs = [...tabs, newTab];
+		activeTabId = newTab.id;
 		addressValue = '';
-		persistTabs();
+		showCollections = false;
+		showSettingsMenu = false;
+		// Open the SSE session for this tab eagerly so cookie/nav events from
+		// the very first proxy fetch are already wired up.
+		openSessionStream(newTab);
 	}
 
-	function closeTab(id: string) {
-		if (tabs.length === 1) {
-			// Reset the last tab to a fresh new-tab page instead of closing.
-			const fresh = newTab();
-			tabs = [fresh];
-			activeTabId = fresh.id;
-			addressValue = '';
-			persistTabs();
-			return;
-		}
+	function closeTab(id: number) {
+		if (tabs.length === 1) return;
+		closeSessionStream(id);
 		const idx = tabs.findIndex((t) => t.id === id);
 		tabs = tabs.filter((t) => t.id !== id);
 		if (activeTabId === id) {
 			activeTabId = tabs[Math.min(idx, tabs.length - 1)].id;
-			syncAddressBar();
 		}
-		persistTabs();
+		syncAddressBar();
 	}
 
-	function switchTab(id: string) {
+	function switchTab(id: number) {
 		activeTabId = id;
+		showCollections = false;
+		showSettingsMenu = false;
 		syncAddressBar();
 	}
 
 	function syncAddressBar() {
-		addressValue = activeTab?.url ?? '';
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (tab) {
+			addressValue = tab.url === 'edge://newtab' ? '' : tab.url;
+		}
+	}
+
+	function isUrl(input: string): boolean {
+		return (
+			input.includes('.') &&
+			!input.startsWith(' ') &&
+			(input.startsWith('http://') ||
+				input.startsWith('https://') ||
+				/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/.test(input))
+		);
+	}
+
+	function getDomain(url: string): string {
+		try {
+			if (!url.startsWith('http')) url = 'https://' + url;
+			return new URL(url).hostname;
+		} catch {
+			return url;
+		}
+	}
+
+	function getFakePageContent(url: string): { title: string; domain: string; body: string } {
+		const domain = getDomain(url);
+		const fakePages: Record<string, { title: string; body: string }> = {
+			'www.microsoft.com': {
+				title: 'Microsoft - AI, Cloud, Productivity',
+				body: 'Welcome to Microsoft. Explore our products including Windows, Office, Azure, and more. Empowering every person and every organization on the planet to achieve more.',
+			},
+			'outlook.live.com': {
+				title: 'Outlook - Free email and calendar',
+				body: 'Connect, organize, and get things done with Outlook. Free email and calendar from Microsoft. Sign in to access your inbox.',
+			},
+			'github.com': {
+				title: 'GitHub: Let\'s build from here',
+				body: 'GitHub is where over 100 million developers shape the future of software, together. Contribute to the open source community, manage your Git repositories, and collaborate.',
+			},
+			'www.youtube.com': {
+				title: 'YouTube',
+				body: 'Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube.',
+			},
+			'en.wikipedia.org': {
+				title: 'Wikipedia, the free encyclopedia',
+				body: 'Wikipedia is a free online encyclopedia, created and edited by volunteers around the world and hosted by the Wikimedia Foundation.',
+			},
+			'www.reddit.com': {
+				title: 'Reddit - Dive into anything',
+				body: 'Reddit is a network of communities where people can dive into their interests, hobbies and passions. There\'s a community for whatever you\'re interested in on Reddit.',
+			},
+		};
+		const content = fakePages[domain];
+		if (content) {
+			return { title: content.title, domain, body: content.body };
+		}
+		return {
+			title: domain,
+			domain,
+			body: `You are viewing ${domain}. This is a simulated page for demonstration purposes.`,
+		};
+	}
+
+	function getSearchResults(query: string) {
+		return [
+			{
+				url: 'www.example.com',
+				title: `${query} - Example Result`,
+				desc: 'This is a sample search result for your query. In a real browser, this would show actual web search results from Bing.',
+			},
+			{
+				url: 'en.wikipedia.org',
+				title: `${query} - Wikipedia`,
+				desc: 'An encyclopedia article about the searched topic with comprehensive information and references.',
+			},
+			{
+				url: 'docs.microsoft.com',
+				title: `${query} - Microsoft Docs`,
+				desc: 'Official Microsoft documentation and learning resources for developers and IT professionals.',
+			},
+			{
+				url: 'stackoverflow.com',
+				title: `${query} - Stack Overflow`,
+				desc: 'Questions and answers related to your search query from the developer community.',
+			},
+		];
+	}
+
+	function simulateLoading(callback: () => void) {
+		isLoading = true;
+		loadingProgress = 0;
+		const interval = setInterval(() => {
+			loadingProgress += Math.random() * 30 + 10;
+			if (loadingProgress >= 100) {
+				loadingProgress = 100;
+				clearInterval(interval);
+				setTimeout(() => {
+					isLoading = false;
+					loadingProgress = 0;
+					callback();
+				}, 100);
+			}
+		}, 80);
+	}
+
+	function navigateTab(
+		tab: Tab,
+		entry: { url: string; title: string; favicon: string; contentType: 'newtab' | 'search' | 'page' | 'settings' },
+		pageContent: { title: string; domain: string; body: string } | null = null,
+		searchQuery: string = ''
+	) {
+		// Trim forward history
+		tab.historyStack = tab.historyStack.slice(0, tab.historyIndex + 1);
+		tab.historyStack.push(entry);
+		tab.historyIndex = tab.historyStack.length - 1;
+		tab.url = entry.url;
+		tab.title = entry.title;
+		tab.favicon = entry.favicon;
+		tab.contentType = entry.contentType;
+		tab.pageContent = pageContent;
+		tab.searchQuery = searchQuery;
+		tabs = tabs;
+	}
+
+	function navigateProxy(tab: Tab, target: string) {
+		tab.proxyTarget = target;
+		simulateLoading(() => {
+			navigateTab(
+				tab,
+				{ url: target, title: getDomain(target), favicon: '🌐', contentType: 'proxy' },
+				null,
+			);
+			addressValue = target;
+		});
+	}
+
+	function handleNavigate() {
+		const input = addressValue.trim();
+		if (!input) return;
+		showSettingsMenu = false;
+		showCollections = false;
+
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+
+		// WHY route both URLs AND search through the proxy: real internet.
+		// Non-URL queries get rewritten into a real DuckDuckGo HTML search —
+		// DDG's `html.duckduckgo.com` endpoint returns server-rendered HTML
+		// that survives our proxy rewriter, unlike Google/Bing which require
+		// JS execution + lots of CSP-protected resources.
+		if (isUrl(input)) {
+			const url = input.startsWith('http') ? input : 'https://' + input;
+			navigateProxy(tab, url);
+		} else {
+			const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(input)}`;
+			navigateProxy(tab, searchUrl);
+		}
+	}
+
+	function handleQuickLink(label: string) {
+		const urlMap: Record<string, string> = {
+			Microsoft: 'https://www.microsoft.com',
+			Outlook: 'https://outlook.live.com',
+			GitHub: 'https://github.com',
+			YouTube: 'https://www.youtube.com',
+			Wikipedia: 'https://en.wikipedia.org',
+			Reddit: 'https://www.reddit.com',
+		};
+		const url = urlMap[label] || `https://www.${label.toLowerCase()}.com`;
+		addressValue = url;
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		navigateProxy(tab, url);
+	}
+
+	function handleSearchResultClick(url: string) {
+		const fullUrl = 'https://' + url;
+		addressValue = fullUrl;
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		navigateProxy(tab, fullUrl);
 	}
 
 	function goBack() {
-		const tab = activeTab;
+		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab || tab.historyIndex <= 0) return;
 		tab.historyIndex--;
-		tab.url = tab.history[tab.historyIndex];
-		tab.title = hostnameOrUrl(tab.url);
-		tab.loading = true;
-		addressValue = tab.url;
+		const entry = tab.historyStack[tab.historyIndex];
+		tab.url = entry.url;
+		tab.title = entry.title;
+		tab.favicon = entry.favicon;
+		tab.contentType = entry.contentType;
+		tab.searchQuery = '';
+		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
+		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
+		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
-		persistTabs();
 	}
 
 	function goForward() {
-		const tab = activeTab;
-		if (!tab || tab.historyIndex >= tab.history.length - 1) return;
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab || tab.historyIndex >= tab.historyStack.length - 1) return;
 		tab.historyIndex++;
-		tab.url = tab.history[tab.historyIndex];
-		tab.title = hostnameOrUrl(tab.url);
-		tab.loading = true;
-		addressValue = tab.url;
+		const entry = tab.historyStack[tab.historyIndex];
+		tab.url = entry.url;
+		tab.title = entry.title;
+		tab.favicon = entry.favicon;
+		tab.contentType = entry.contentType;
+		tab.searchQuery = '';
+		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
+		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
+		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
-		persistTabs();
 	}
 
-	function reload() {
-		const tab = activeTab;
-		if (!tab) return;
-		const iframe = iframeRefs[tab.id];
-		if (iframe && tab.url) {
-			tab.loading = true;
+	// WHY a nonce on the iframe URL during refresh: the browser otherwise
+	// serves the iframe from cache and you get an apparent no-op. Toggling
+	// the nonce changes the src and forces a reload.
+	let iframeNonce = $state(0);
+	function refresh() {
+		if (!activeTab) return;
+		iframeNonce++;
+		simulateLoading(() => {
 			tabs = tabs;
-			// Re-assign src to force a refetch through the proxy.
-			iframe.src = proxyUrl(tab.url, tab.sessionId);
-		}
+		});
 	}
 
-	function handleAddressSubmit(e: Event) {
-		e.preventDefault();
-		const v = addressValue.trim();
-		if (!v) return;
-		navigateActive(v);
-	}
-
-	function navigateTo(target: string) {
-		navigateActive(target);
-	}
-
-	function addBookmarkForActive() {
-		const tab = activeTab;
-		if (!tab || !tab.url) return;
-		if (bookmarks.some((b) => b.url === tab.url)) return;
-		bookmarks = [...bookmarks, { label: tab.title || hostnameOrUrl(tab.url), url: tab.url, icon: '🔖' }];
-		persistBookmarks();
-	}
-
-	function removeBookmark(url: string) {
-		bookmarks = bookmarks.filter((b) => b.url !== url);
-		persistBookmarks();
-	}
-
-	function persistTabs() {
-		try {
-			// Don't persist transient loading flags / iframe state.
-			const serializable = tabs.map((t) => ({
-				id: t.id,
-				url: t.url,
-				title: t.title,
-				history: t.history,
-				historyIndex: t.historyIndex,
-				sessionId: t.sessionId,
-			}));
-			localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify({ tabs: serializable, activeTabId }));
-		} catch {
-			// localStorage can throw in private mode / quota; ignore.
-		}
-	}
-
-	function persistBookmarks() {
-		try {
-			localStorage.setItem(BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks));
-		} catch { /* ignore */ }
-	}
-
-	function dismissWarning() {
-		showWarning = false;
-		try { localStorage.setItem(WARNING_DISMISSED_KEY, '1'); } catch { /* ignore */ }
-	}
-
-	function handleIframeLoad(tabId: string) {
-		const tab = tabs.find((t) => t.id === tabId);
+	function openSettings() {
+		showSettingsMenu = false;
+		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab) return;
-		tab.loading = false;
-		// Same-origin reads should work because the proxied content is served
-		// from our origin. Try anyway and swallow any cross-origin errors.
-		try {
-			const iframe = iframeRefs[tabId];
-			const loc = iframe?.contentWindow?.location;
-			if (loc && loc.search) {
-				const params = new URLSearchParams(loc.search);
-				const realUrl = params.get('url');
-				if (realUrl && realUrl !== tab.url) {
-					// The iframe navigated (e.g. via redirect handled by proxy)
-					// to a different URL than we set — update history.
-					tab.history = tab.history.slice(0, tab.historyIndex + 1);
-					tab.history.push(realUrl);
-					tab.historyIndex = tab.history.length - 1;
-					tab.url = realUrl;
-					tab.title = hostnameOrUrl(realUrl);
-					if (activeTabId === tabId) addressValue = realUrl;
-				}
-			}
-		} catch { /* cross-origin or detached frame */ }
-		tabs = tabs;
-		persistTabs();
+		navigateTab(
+			tab,
+			{ url: 'edge://settings', title: 'Settings', favicon: '⚙️', contentType: 'settings' },
+			null
+		);
+		addressValue = 'edge://settings';
+	}
+
+	function handleNewTabSearch() {
+		if (addressValue.trim()) handleNavigate();
+	}
+
+	const quickLinks = [
+		{ label: 'Microsoft', icon: '🟦', color: '#0078D4' },
+		{ label: 'Outlook', icon: '📧', color: '#0072C6' },
+		{ label: 'GitHub', icon: '🐱', color: '#24292e' },
+		{ label: 'YouTube', icon: '▶️', color: '#FF0000' },
+		{ label: 'Wikipedia', icon: '📚', color: '#333' },
+		{ label: 'Reddit', icon: '🟠', color: '#FF4500' },
+	];
+
+	const settingsMenuItems = [
+		{ label: 'New tab', icon: '📄', action: addTab },
+		{ label: 'New window', icon: '🪟', action: () => {} },
+		{ label: 'History', icon: '🕐', action: () => {} },
+		{ label: 'Downloads', icon: '⬇️', action: () => {} },
+		{ label: 'Extensions', icon: '🧩', action: () => {} },
+		{ separator: true, label: '', icon: '', action: () => {} },
+		{ label: 'Refresh proxy session', icon: '🔄', action: refreshProxySession },
+		{ label: 'Settings', icon: '⚙️', action: openSettings },
+	];
+
+	const downloadableFiles = [
+		{
+			name: 'sample-report.txt',
+			label: 'Sample Report (.txt)',
+			size: '2 KB',
+			content:
+				'Quarterly Performance Report\n============================\n\nDate: February 2025\nPrepared by: Analytics Team\n\nSummary\n-------\nOverall performance improved by 12% compared to Q3.\nUser engagement increased across all platforms.\n\nKey Metrics\n-----------\n- Monthly Active Users: 2.4M (+8%)\n- Revenue: $4.2M (+15%)\n- Customer Satisfaction: 94%\n- Uptime: 99.97%\n\nRecommendations\n---------------\n1. Continue investment in mobile experience\n2. Expand to two new regions in Q2\n3. Launch beta program for enterprise features\n',
+		},
+		{
+			name: 'data.csv',
+			label: 'Sample Data (.csv)',
+			size: '1 KB',
+			content:
+				'Name,Department,Role,Start Date,Salary\nAlice Johnson,Engineering,Senior Developer,2021-03-15,125000\nBob Smith,Marketing,Campaign Manager,2022-07-01,95000\nCarol Davis,Engineering,Tech Lead,2019-11-20,145000\nDan Wilson,Sales,Account Executive,2023-01-10,88000\nEva Martinez,Design,UX Designer,2020-06-22,110000\nFrank Lee,Engineering,Junior Developer,2024-02-14,78000\nGrace Kim,HR,Recruiter,2022-09-05,85000\n',
+		},
+		{
+			name: 'readme.md',
+			label: 'Readme (.md)',
+			size: '1 KB',
+			content:
+				'# Project Documentation\n\nWelcome to the project repository.\n\n## Getting Started\n\n1. Clone the repository\n2. Install dependencies with `npm install`\n3. Start the dev server with `npm run dev`\n\n## Project Structure\n\n- `src/` - Source code\n- `tests/` - Test files\n- `docs/` - Documentation\n\n## Contributing\n\nPlease read CONTRIBUTING.md before submitting pull requests.\n\n## License\n\nMIT License - see LICENSE file for details.\n',
+		},
+	];
+
+	function handleDownload(file: { name: string; content: string }) {
+		const path = `C:/Users/User/Downloads/${file.name}`;
+		const success = writeFile(path, file.content);
+		if (success) {
+			notify({
+				appName: 'Microsoft Edge',
+				appIcon: '🌐',
+				title: 'Download complete',
+				body: `${file.name} has been saved to Downloads.`,
+			});
+		}
 	}
 
 	function handleEdgeKeyDown(e: KeyboardEvent) {
-		if (!(e.ctrlKey || e.metaKey)) return;
-		const k = e.key.toLowerCase();
-		if (k === 'l') {
-			e.preventDefault();
-			e.stopPropagation();
-			addressInputRef?.focus();
-			addressInputRef?.select();
-		} else if (k === 't') {
-			e.preventDefault();
-			e.stopPropagation();
-			addTab();
-		} else if (k === 'w') {
-			e.preventDefault();
-			e.stopPropagation();
-			closeTab(activeTabId);
-		} else if (k === 'r') {
-			e.preventDefault();
-			e.stopPropagation();
-			reload();
-		} else if (k === 'c' && document.activeElement === addressInputRef && activeTab) {
-			e.preventDefault();
-			e.stopPropagation();
-			const start = addressInputRef?.selectionStart ?? 0;
-			const end = addressInputRef?.selectionEnd ?? 0;
-			if (start !== end && addressInputRef) {
-				copyText(addressInputRef.value.substring(start, end));
-			} else if (activeTab.url) {
-				copyText(activeTab.url);
+		if (e.ctrlKey || e.metaKey) {
+			// Ctrl+L: focus and select address bar
+			if (e.key.toLowerCase() === 'l') {
+				e.preventDefault();
+				e.stopPropagation();
+				if (addressInputRef) {
+					addressInputRef.focus();
+					addressInputRef.select();
+				}
+				return;
 			}
-		}
-	}
-
-	function handleMessage(e: MessageEvent) {
-		// The injected runtime hook in proxied pages posts these.
-		if (!e.data || typeof e.data !== 'object') return;
-		if ((e.data as { source?: string }).source !== 'edge-proxy') return;
-		const { type, url } = e.data as { type?: string; url?: string };
-		if (type === 'navigate' && url) {
-			// Figure out which tab the event came from by matching the iframe's
-			// contentWindow against `e.source`.
-			for (const t of tabs) {
-				const iframe = iframeRefs[t.id];
-				if (iframe && iframe.contentWindow === e.source) {
-					if (t.id === activeTabId) {
-						addressValue = url;
+			// Ctrl+C when address bar is focused: copy current URL to shared clipboard
+			if (e.key.toLowerCase() === 'c') {
+				if (document.activeElement === addressInputRef && activeTab) {
+					e.preventDefault();
+					e.stopPropagation();
+					// If there's a selection in the address bar, copy that; otherwise copy the full URL
+					const start = addressInputRef?.selectionStart ?? 0;
+					const end = addressInputRef?.selectionEnd ?? 0;
+					if (start !== end && addressInputRef) {
+						copyText(addressInputRef.value.substring(start, end));
+					} else {
+						const url = activeTab.url === 'edge://newtab' ? '' : activeTab.url;
+						if (url) copyText(url);
 					}
-					// Only push to history if this is a real navigation, not
-					// the initial load notification (which re-states the
-					// current URL through our proxy lens).
-					try {
-						const u = new URL(url, t.url || 'https://example.com').toString();
-						if (u !== t.url) {
-							t.history = t.history.slice(0, t.historyIndex + 1);
-							t.history.push(u);
-							t.historyIndex = t.history.length - 1;
-							t.url = u;
-							t.title = hostnameOrUrl(u);
-							if (t.id === activeTabId) addressValue = u;
-							tabs = tabs;
-							persistTabs();
-						}
-					} catch { /* ignore parse errors */ }
-					break;
 				}
 			}
 		}
 	}
 
 	onMount(() => {
-		// Restore tabs / bookmarks from localStorage.
-		try {
-			const rawTabs = localStorage.getItem(TABS_STORAGE_KEY);
-			if (rawTabs) {
-				const parsed = JSON.parse(rawTabs) as { tabs: Tab[]; activeTabId: string };
-				if (parsed.tabs && parsed.tabs.length > 0) {
-					tabs = parsed.tabs.map((t) => ({ ...t, loading: false }));
-					activeTabId = parsed.activeTabId && tabs.some((t) => t.id === parsed.activeTabId)
-						? parsed.activeTabId
-						: tabs[0].id;
-					syncAddressBar();
-				}
-			}
-		} catch { /* corrupt storage — ignore */ }
-		try {
-			const rawBm = localStorage.getItem(BOOKMARKS_STORAGE_KEY);
-			if (rawBm) {
-				const parsed = JSON.parse(rawBm) as Bookmark[];
-				if (Array.isArray(parsed)) bookmarks = parsed;
-			}
-		} catch { /* ignore */ }
-		try {
-			showWarning = localStorage.getItem(WARNING_DISMISSED_KEY) !== '1';
-		} catch { showWarning = true; }
-
-		// Honour any pending file-open request. Edge is registered as the
-		// handler for .pdf/.docx/.xlsx/.pptx in file-registry.ts — we don't
-		// have anywhere meaningful to send those, so just open a new-tab
-		// page (preserves the contract — opening these files won't crash).
-		const pending = consumePendingFile();
-		if (pending) {
-			// No-op for now: in a real proxy we'd serve a file viewer.
-			// At minimum, make sure the tab title hints at the requested file.
-			const t = activeTab;
-			if (t) {
-				t.title = pending.path.split('/').pop() || 'File';
-				tabs = tabs;
+		function handleClickOutside(e: MouseEvent) {
+			const target = e.target as HTMLElement;
+			if (showSettingsMenu && !target.closest('.settings-menu-wrapper')) {
+				showSettingsMenu = false;
 			}
 		}
+		document.addEventListener('click', handleClickOutside);
+		window.addEventListener('message', handleIframeMessage);
 
-		window.addEventListener('message', handleMessage);
-		return () => window.removeEventListener('message', handleMessage);
+		// Open SSE streams for any pre-existing tabs (initial tab in $state).
+		for (const t of tabs) openSessionStream(t);
+
+		return () => {
+			document.removeEventListener('click', handleClickOutside);
+			window.removeEventListener('message', handleIframeMessage);
+			for (const id of Array.from(tabStreams.keys())) closeSessionStream(id);
+		};
 	});
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="edge-browser" onkeydown={handleEdgeKeyDown}>
-	<!-- Tab strip -->
+	<!-- Loading bar -->
+	{#if isLoading}
+		<div class="loading-bar">
+			<div class="loading-progress" style:width="{loadingProgress}%"></div>
+		</div>
+	{/if}
+
+	<!-- Tab bar -->
 	<div class="tab-bar">
 		<div class="tabs-container">
 			{#each tabs as tab (tab.id)}
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
 					class="tab"
 					class:active={activeTabId === tab.id}
 					onclick={() => switchTab(tab.id)}
 				>
-					<span class="tab-favicon">{tab.url ? '🌐' : '🏠'}</span>
+					<span class="tab-favicon">{tab.favicon}</span>
 					<span class="tab-title">{tab.title}</span>
-					{#if tab.loading}<span class="tab-spinner"></span>{/if}
-					<button
-						class="tab-close"
-						title="Close tab"
-						aria-label="Close tab"
-						onclick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-					>
-						<svg width="10" height="10" viewBox="0 0 10 10">
-							<line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
-							<line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
-						</svg>
-					</button>
+					{#if tabs.length > 1}
+						<button
+							class="tab-close"
+							onclick={(e) => {
+								e.stopPropagation();
+								closeTab(tab.id);
+							}}
+						>
+							<svg width="10" height="10" viewBox="0 0 10 10">
+								<line
+									x1="2"
+									y1="2"
+									x2="8"
+									y2="8"
+									stroke="currentColor"
+									stroke-width="1"
+								/>
+								<line
+									x1="8"
+									y1="2"
+									x2="2"
+									y2="8"
+									stroke="currentColor"
+									stroke-width="1"
+								/>
+							</svg>
+						</button>
+					{/if}
 				</div>
 			{/each}
-			<button class="new-tab-btn" title="New tab" aria-label="New tab" onclick={addTab}>
-				<svg width="12" height="12" viewBox="0 0 12 12">
-					<line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.2" />
-					<line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.2" />
-				</svg>
-			</button>
+			{#if tabs.length < 5}
+				<button class="new-tab-btn" onclick={addTab} title="New tab">
+					<svg width="12" height="12" viewBox="0 0 12 12">
+						<line
+							x1="6"
+							y1="1"
+							x2="6"
+							y2="11"
+							stroke="currentColor"
+							stroke-width="1.2"
+						/>
+						<line
+							x1="1"
+							y1="6"
+							x2="11"
+							y2="6"
+							stroke="currentColor"
+							stroke-width="1.2"
+						/>
+					</svg>
+				</button>
+			{/if}
 		</div>
 	</div>
 
-	<!-- Toolbar: nav + address + actions -->
+	<!-- Navigation bar -->
 	<div class="nav-bar">
 		<div class="nav-controls">
-			<button class="nav-btn" disabled={!canGoBack} onclick={goBack} title="Back" aria-label="Back">
-				<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><polygon points="9,2 4,7 9,12" /></svg>
+			<button class="nav-btn" disabled={!canGoBack} onclick={goBack} title="Back">
+				<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"
+					><polygon points="9,2 4,7 9,12" /></svg
+				>
 			</button>
-			<button class="nav-btn" disabled={!canGoForward} onclick={goForward} title="Forward" aria-label="Forward">
-				<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><polygon points="5,2 10,7 5,12" /></svg>
+			<button class="nav-btn" disabled={!canGoForward} onclick={goForward} title="Forward">
+				<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"
+					><polygon points="5,2 10,7 5,12" /></svg
+				>
 			</button>
-			<button class="nav-btn" onclick={reload} title="Reload" aria-label="Reload">
-				<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
+			<button class="nav-btn" onclick={refresh} title="Refresh">
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 14 14"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.5"
+				>
 					<path d="M11.5 7A4.5 4.5 0 117 2.5" />
 					<polygon points="7,0.5 9,2.5 7,4.5" fill="currentColor" />
 				</svg>
 			</button>
 		</div>
 
-		<form class="address-bar" onsubmit={handleAddressSubmit}>
-			<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" class="address-search-icon">
+		<form
+			class="address-bar"
+			onsubmit={(e) => {
+				e.preventDefault();
+				handleNavigate();
+			}}
+		>
+			<svg
+				width="14"
+				height="14"
+				viewBox="0 0 20 20"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="1.5"
+				class="address-search-icon"
+			>
 				<circle cx="9" cy="9" r="5.5" />
 				<line x1="13" y1="13" x2="17" y2="17" />
 			</svg>
@@ -484,127 +732,266 @@
 		<div class="toolbar-right">
 			<button
 				class="toolbar-btn"
-				title="Add bookmark"
-				aria-label="Add bookmark"
-				disabled={!activeTab?.url}
-				onclick={addBookmarkForActive}
-			>
-				<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-					<path d="M3 1.5v13l5-3 5 3v-13a1 1 0 00-1-1H4a1 1 0 00-1 1z" />
-				</svg>
-			</button>
-			<button
-				class="toolbar-btn"
-				class:toolbar-btn-active={showBookmarkPrompt}
-				title="Bookmarks"
-				aria-label="Bookmarks"
-				onclick={() => (showBookmarkPrompt = !showBookmarkPrompt)}
+				class:toolbar-btn-active={showCollections}
+				title="Collections"
+				onclick={() => {
+					showCollections = !showCollections;
+					showSettingsMenu = false;
+				}}
 			>
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
 					<path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z" />
 				</svg>
 			</button>
+			<div class="settings-menu-wrapper">
+				<button
+					class="toolbar-btn"
+					class:toolbar-btn-active={showSettingsMenu}
+					title="Settings and more"
+					onclick={(e) => {
+						e.stopPropagation();
+						showSettingsMenu = !showSettingsMenu;
+						showCollections = false;
+					}}
+				>
+					<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+						<circle cx="3" cy="8" r="1.5" />
+						<circle cx="8" cy="8" r="1.5" />
+						<circle cx="13" cy="8" r="1.5" />
+					</svg>
+				</button>
+				{#if showSettingsMenu}
+					<div class="settings-dropdown">
+						{#each settingsMenuItems as item}
+							{#if item.separator}
+								<div class="menu-separator"></div>
+							{:else}
+								<button
+									class="menu-item"
+									onclick={() => {
+										item.action();
+										showSettingsMenu = false;
+									}}
+								>
+									<span class="menu-icon">{item.icon}</span>
+									<span>{item.label}</span>
+								</button>
+							{/if}
+						{/each}
+					</div>
+				{/if}
+			</div>
 		</div>
 	</div>
 
-	<!-- Bookmarks bar -->
-	<div class="bookmarks-bar">
-		{#each bookmarks as bm (bm.url)}
-			<button
-				class="bookmark"
-				title={bm.url}
-				onclick={() => navigateTo(bm.url)}
-				oncontextmenu={(e) => { e.preventDefault(); removeBookmark(bm.url); }}
-			>
-				<span class="bookmark-icon">{bm.icon}</span>
-				<span class="bookmark-label">{bm.label}</span>
-			</button>
-		{/each}
-	</div>
-
-	{#if showWarning}
-		<div class="proxy-warning">
-			<span class="warning-icon">ℹ️</span>
-			<span class="warning-text">
-				Browsing through a proxy — some sites may not work fully (logins,
-				WebSockets, anti-bot protected pages).
-			</span>
-			<button class="warning-dismiss" onclick={dismissWarning}>Dismiss</button>
-		</div>
-	{/if}
-
-	<!-- Content -->
+	<!-- Content area -->
 	<div class="content-area">
-		{#if activeTab?.loading}
-			<div class="loading-bar"><div class="loading-progress"></div></div>
-		{/if}
+		{#if activeTab?.contentType === 'newtab'}
+			<div class="newtab-page">
+				<div class="newtab-greeting">Good morning</div>
 
-		{#each tabs as tab (tab.id)}
-			{#if tab.id === activeTabId}
-				{#if tab.url}
-					<!-- Real proxied page. allow-same-origin so we can read iframe.contentWindow.location
-						(the proxied content is served from our own origin so this is safe). -->
-					<iframe
-						bind:this={iframeRefs[tab.id]}
-						class="page-frame"
-						title={tab.title}
-						src={proxyUrl(tab.url, tab.sessionId)}
-						sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
-						onload={() => handleIframeLoad(tab.id)}
-					></iframe>
-				{:else}
-					<div class="newtab-page">
-						<div class="newtab-greeting">New tab</div>
-						<form class="newtab-search" onsubmit={(e) => { e.preventDefault(); if (addressValue.trim()) navigateActive(addressValue); }}>
-							<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="rgba(0,0,0,0.45)" stroke-width="1.5">
-								<circle cx="9" cy="9" r="6" />
-								<line x1="13.5" y1="13.5" x2="18" y2="18" />
-							</svg>
-							<input
-								type="text"
-								class="newtab-search-input"
-								placeholder="Search the web or enter address"
-								bind:value={addressValue}
-							/>
-						</form>
-						<div class="quick-links">
-							{#each bookmarks as bm (bm.url)}
-								<button class="quick-link" onclick={() => navigateTo(bm.url)}>
-									<div class="quick-link-icon"><span>{bm.icon}</span></div>
-									<span class="quick-link-label">{bm.label}</span>
+				<div class="search-container">
+					<div class="bing-logo">
+						<span class="bing-text">Microsoft Bing</span>
+					</div>
+					<form
+						class="newtab-search"
+						onsubmit={(e) => {
+							e.preventDefault();
+							handleNewTabSearch();
+						}}
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 20 20"
+							fill="none"
+							stroke="rgba(0,0,0,0.4)"
+							stroke-width="1.5"
+						>
+							<circle cx="9" cy="9" r="6" />
+							<line x1="13.5" y1="13.5" x2="18" y2="18" />
+						</svg>
+						<input
+							type="text"
+							placeholder="Search the web"
+							class="newtab-search-input"
+							bind:value={addressValue}
+						/>
+					</form>
+				</div>
+
+				<div class="quick-links">
+					{#each quickLinks as link (link.label)}
+						<button class="quick-link" onclick={() => handleQuickLink(link.label)}>
+							<div class="quick-link-icon" style:background={link.color}>
+								<span>{link.icon}</span>
+							</div>
+							<span class="quick-link-label">{link.label}</span>
+						</button>
+					{/each}
+				</div>
+			</div>
+		{:else if activeTab?.contentType === 'search'}
+			<div class="search-results">
+				<div class="results-header">
+					<span class="bing-small">Bing</span>
+					<span class="results-query">Results for: {activeTab.searchQuery}</span>
+				</div>
+				<div class="results-list">
+					{#each getSearchResults(activeTab.searchQuery) as result, ri (result.url + '-' + ri)}
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<div class="result-item" onclick={() => handleSearchResultClick(result.url)}>
+							<div class="result-url">{result.url}</div>
+							<div class="result-title">{result.title}</div>
+							<div class="result-desc">{result.desc}</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{:else if activeTab?.contentType === 'page' && activeTab.pageContent}
+			<div class="fake-page">
+				<div class="page-header-bar">
+					<span class="page-domain">{activeTab.pageContent.domain}</span>
+				</div>
+				<div class="page-body">
+					<h1 class="page-title">{activeTab.pageContent.title}</h1>
+					<p class="page-text">{activeTab.pageContent.body}</p>
+					<div class="page-placeholder">
+						<div class="placeholder-block"></div>
+						<div class="placeholder-block short"></div>
+						<div class="placeholder-block"></div>
+						<div class="placeholder-block medium"></div>
+					</div>
+					<div class="download-section">
+						<div class="download-section-title">Downloads</div>
+						<div class="download-list">
+							{#each downloadableFiles as dlFile (dlFile.name)}
+								<button class="download-item" onclick={() => handleDownload(dlFile)}>
+									<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" class="download-icon">
+										<path d="M8 1v9M8 10L4.5 6.5M8 10l3.5-3.5M2 12v2h12v-2" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+									</svg>
+									<div class="download-item-info">
+										<span class="download-item-name">{dlFile.label}</span>
+										<span class="download-item-size">{dlFile.size}</span>
+									</div>
 								</button>
 							{/each}
 						</div>
 					</div>
-				{/if}
+				</div>
+			</div>
+		{:else if activeTab?.contentType === 'proxy' && activeTab.proxyTarget}
+			<!--
+				WHY the iframe src includes iframeNonce only in a hash fragment:
+				we want the proxy URL to remain stable for caching/sharing, but
+				we need a way to force the iframe to reload on user click of
+				Refresh. The hash is ignored by the server router but Chrome
+				treats a different src as a reload.
+
+				WHY sandbox is permissive (allow-scripts, allow-forms, etc):
+				most real sites are unusable without scripts, forms, popups.
+				We accept the security trade-off because the proxied content
+				is already same-origin from the browser's POV (served via
+				/api/proxy on our domain) — sandbox is a defense-in-depth
+				layer, not a primary boundary.
+			-->
+			<iframe
+				class="proxy-frame"
+				title="Proxied content"
+				src={buildProxyUrl(activeTab.proxyTarget, activeTab.sessionId) + '#n=' + iframeNonce}
+				sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+				referrerpolicy="no-referrer"
+			></iframe>
+			{#if activeTab.proxyStreamError}
+				<div class="proxy-status-warn">
+					Session channel disconnected. The page will still load, but cookie / nav events
+					may be missed. Try "Refresh proxy session" from the menu.
+				</div>
 			{/if}
-		{/each}
+		{:else if activeTab?.contentType === 'settings'}
+			<div class="settings-page">
+				<div class="settings-sidebar">
+					<h2 class="settings-heading">Settings</h2>
+					<div class="settings-nav">
+						<button class="settings-nav-item active">Profiles</button>
+						<button class="settings-nav-item">Privacy, search, and services</button>
+						<button class="settings-nav-item">Appearance</button>
+						<button class="settings-nav-item">Start, home, and new tabs</button>
+						<button class="settings-nav-item">Cookies and site permissions</button>
+						<button class="settings-nav-item">Downloads</button>
+						<button class="settings-nav-item">Languages</button>
+						<button class="settings-nav-item">System and performance</button>
+						<button class="settings-nav-item">About Microsoft Edge</button>
+					</div>
+				</div>
+				<div class="settings-content">
+					<h3 class="settings-section-title">Your profile</h3>
+					<div class="settings-card">
+						<div class="settings-row">
+							<div class="profile-avatar">👤</div>
+							<div class="profile-info">
+								<div class="profile-name">User</div>
+								<div class="profile-email">user@example.com</div>
+							</div>
+						</div>
+					</div>
+					<h3 class="settings-section-title">Profile settings</h3>
+					<div class="settings-card">
+						<div class="settings-toggle-row">
+							<span>Sync</span>
+							<span class="toggle-label">On</span>
+						</div>
+						<div class="settings-toggle-row">
+							<span>Password manager</span>
+							<span class="toggle-label">On</span>
+						</div>
+						<div class="settings-toggle-row">
+							<span>Payment info</span>
+							<span class="toggle-label">Off</span>
+						</div>
+					</div>
+				</div>
+			</div>
+		{/if}
 	</div>
 
-	{#if showBookmarkPrompt}
-		<div class="bookmarks-panel">
-			<div class="bookmarks-panel-header">Bookmarks</div>
-			<div class="bookmarks-panel-list">
-				{#each bookmarks as bm (bm.url)}
-					<div class="bookmarks-panel-item">
-						<button class="bookmarks-panel-link" onclick={() => { navigateTo(bm.url); showBookmarkPrompt = false; }}>
-							<span class="bookmark-icon">{bm.icon}</span>
-							<div class="bookmarks-panel-text">
-								<div class="bookmarks-panel-label">{bm.label}</div>
-								<div class="bookmarks-panel-url">{bm.url}</div>
-							</div>
-						</button>
-						<button class="bookmarks-panel-remove" title="Remove" onclick={() => removeBookmark(bm.url)}>
-							<svg width="10" height="10" viewBox="0 0 10 10">
-								<line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
-								<line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
-							</svg>
-						</button>
-					</div>
-				{/each}
-				{#if bookmarks.length === 0}
-					<div class="bookmarks-panel-empty">No bookmarks yet. Click the bookmark icon to save the current page.</div>
-				{/if}
+	<!-- Collections side panel -->
+	{#if showCollections}
+		<div class="collections-panel">
+			<div class="collections-header">
+				<span class="collections-title">Collections</span>
+				<button
+					class="collections-close"
+					onclick={() => (showCollections = false)}
+				>
+					<svg width="10" height="10" viewBox="0 0 10 10">
+						<line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
+						<line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
+					</svg>
+				</button>
+			</div>
+			<div class="collections-body">
+				<div class="collections-empty">
+					<svg
+						width="48"
+						height="48"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="rgba(0,0,0,0.2)"
+						stroke-width="1"
+					>
+						<rect x="3" y="3" width="18" height="18" rx="2" />
+						<line x1="3" y1="9" x2="21" y2="9" />
+						<line x1="9" y1="3" x2="9" y2="21" />
+					</svg>
+					<span class="collections-empty-text">No collections yet</span>
+					<span class="collections-empty-sub"
+						>Save pages, text, and images to collections to organize your ideas.</span
+					>
+					<button class="collections-new-btn">+ Start new collection</button>
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -617,7 +1004,24 @@
 		flex-direction: column;
 		background: white;
 		position: relative;
-		min-height: 0;
+	}
+
+	/* Loading bar */
+	.loading-bar {
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 3px;
+		background: transparent;
+		z-index: 100;
+		overflow: hidden;
+	}
+
+	.loading-progress {
+		height: 100%;
+		background: var(--win-accent);
+		transition: width 0.1s ease;
 	}
 
 	/* Tab bar */
@@ -626,7 +1030,6 @@
 		padding: 6px 8px 0;
 		display: flex;
 		align-items: flex-end;
-		flex-shrink: 0;
 	}
 
 	.tabs-container {
@@ -634,47 +1037,48 @@
 		align-items: flex-end;
 		gap: 1px;
 		flex: 1;
-		overflow-x: auto;
-		overflow-y: hidden;
+		overflow: hidden;
 	}
 
 	.tab {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 6px 10px;
-		max-width: 220px;
-		min-width: 100px;
+		padding: 6px 12px;
+		max-width: 200px;
+		min-width: 80px;
 		border-radius: 8px 8px 0 0;
 		font-size: 12px;
 		color: var(--win-text-secondary);
 		cursor: default;
 		transition: background-color 0.1s ease;
 		position: relative;
+	}
+
+	.tab:hover {
+		background: rgba(0, 0, 0, 0.03);
+	}
+
+	.tab.active {
+		background: white;
+		color: var(--win-text-primary);
+	}
+
+	.tab-favicon {
+		font-size: 12px;
 		flex-shrink: 0;
 	}
 
-	.tab:hover { background: rgba(0, 0, 0, 0.03); }
-	.tab.active { background: white; color: var(--win-text-primary); }
-
-	.tab-favicon { font-size: 12px; flex-shrink: 0; }
-	.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-
-	.tab-spinner {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		border: 1.5px solid rgba(0, 0, 0, 0.15);
-		border-top-color: var(--win-accent);
-		animation: spin 0.8s linear infinite;
-		flex-shrink: 0;
+	.tab-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		flex: 1;
 	}
-
-	@keyframes spin { to { transform: rotate(360deg); } }
 
 	.tab-close {
-		width: 18px;
-		height: 18px;
+		width: 20px;
+		height: 20px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -684,8 +1088,14 @@
 		opacity: 0;
 		transition: all 0.1s ease;
 	}
-	.tab:hover .tab-close { opacity: 1; }
-	.tab-close:hover { background: rgba(0, 0, 0, 0.06); }
+
+	.tab:hover .tab-close {
+		opacity: 1;
+	}
+
+	.tab-close:hover {
+		background: rgba(0, 0, 0, 0.06);
+	}
 
 	.new-tab-btn {
 		width: 28px;
@@ -700,9 +1110,12 @@
 		flex-shrink: 0;
 		transition: background-color 0.1s ease;
 	}
-	.new-tab-btn:hover { background: rgba(0, 0, 0, 0.04); }
 
-	/* Nav bar */
+	.new-tab-btn:hover {
+		background: rgba(0, 0, 0, 0.04);
+	}
+
+	/* Navigation bar */
 	.nav-bar {
 		display: flex;
 		align-items: center;
@@ -710,10 +1123,12 @@
 		padding: 4px 8px;
 		background: white;
 		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-		flex-shrink: 0;
 	}
 
-	.nav-controls { display: flex; gap: 2px; }
+	.nav-controls {
+		display: flex;
+		gap: 2px;
+	}
 
 	.nav-btn {
 		width: 30px;
@@ -725,8 +1140,14 @@
 		color: var(--win-text-primary);
 		transition: background-color 0.1s ease;
 	}
-	.nav-btn:not(:disabled):hover { background: rgba(0, 0, 0, 0.04); }
-	.nav-btn:disabled { color: var(--win-text-disabled); }
+
+	.nav-btn:not(:disabled):hover {
+		background: rgba(0, 0, 0, 0.04);
+	}
+
+	.nav-btn:disabled {
+		color: var(--win-text-disabled);
+	}
 
 	.address-bar {
 		flex: 1;
@@ -737,15 +1158,21 @@
 		background: var(--win-surface);
 		border: 1px solid rgba(0, 0, 0, 0.06);
 		border-radius: 20px;
-		transition: border-color 0.15s ease, box-shadow 0.15s ease;
+		transition:
+			border-color 0.15s ease,
+			box-shadow 0.15s ease;
 	}
+
 	.address-bar:focus-within {
 		border-color: var(--win-accent);
 		box-shadow: 0 0 0 1px var(--win-accent);
 		background: white;
 	}
 
-	.address-search-icon { flex-shrink: 0; color: var(--win-text-secondary); }
+	.address-search-icon {
+		flex-shrink: 0;
+		color: var(--win-text-secondary);
+	}
 
 	.address-input {
 		flex: 1;
@@ -754,9 +1181,15 @@
 		font-size: 13px;
 		color: var(--win-text-primary);
 	}
-	.address-input::placeholder { color: var(--win-text-secondary); }
 
-	.toolbar-right { display: flex; gap: 2px; }
+	.address-input::placeholder {
+		color: var(--win-text-secondary);
+	}
+
+	.toolbar-right {
+		display: flex;
+		gap: 2px;
+	}
 
 	.toolbar-btn {
 		width: 32px;
@@ -768,99 +1201,69 @@
 		color: var(--win-text-secondary);
 		transition: background-color 0.1s ease;
 	}
-	.toolbar-btn:hover:not(:disabled) { background: rgba(0, 0, 0, 0.04); }
-	.toolbar-btn:disabled { color: var(--win-text-disabled); }
-	.toolbar-btn-active { background: rgba(0, 120, 212, 0.08); color: var(--win-accent); }
 
-	/* Bookmarks bar */
-	.bookmarks-bar {
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		padding: 4px 8px;
-		background: #fafafa;
-		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-		overflow-x: auto;
-		flex-shrink: 0;
+	.toolbar-btn:hover {
+		background: rgba(0, 0, 0, 0.04);
 	}
 
-	.bookmark {
+	.toolbar-btn-active {
+		background: rgba(0, 120, 212, 0.08);
+		color: var(--win-accent);
+	}
+
+	/* Settings dropdown */
+	.settings-menu-wrapper {
+		position: relative;
+	}
+
+	.settings-dropdown {
+		position: absolute;
+		top: 36px;
+		right: 0;
+		width: 220px;
+		background: white;
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: 8px;
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+		z-index: 50;
+		padding: 4px;
+		overflow: hidden;
+	}
+
+	.menu-item {
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		padding: 4px 8px;
-		font-size: 12px;
+		gap: 10px;
+		width: 100%;
+		padding: 8px 12px;
+		font-size: 13px;
 		color: var(--win-text-primary);
 		border-radius: 4px;
-		flex-shrink: 0;
-		transition: background-color 0.1s ease;
-	}
-	.bookmark:hover { background: rgba(0, 0, 0, 0.05); }
-
-	.bookmark-icon { font-size: 13px; }
-	.bookmark-label { white-space: nowrap; }
-
-	/* Proxy warning banner */
-	.proxy-warning {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 16px;
-		background: #fff8e1;
-		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-		font-size: 12px;
-		color: #5d4a00;
-		flex-shrink: 0;
+		text-align: left;
+		transition: background-color 0.08s ease;
 	}
 
-	.warning-icon { flex-shrink: 0; }
-	.warning-text { flex: 1; line-height: 1.4; }
-	.warning-dismiss {
-		flex-shrink: 0;
-		padding: 4px 12px;
-		background: rgba(0, 0, 0, 0.05);
-		border-radius: 4px;
-		font-size: 12px;
-		color: #5d4a00;
-		transition: background-color 0.1s ease;
+	.menu-item:hover {
+		background: rgba(0, 0, 0, 0.04);
 	}
-	.warning-dismiss:hover { background: rgba(0, 0, 0, 0.1); }
 
-	/* Content */
+	.menu-icon {
+		font-size: 14px;
+		width: 20px;
+		text-align: center;
+	}
+
+	.menu-separator {
+		height: 1px;
+		background: rgba(0, 0, 0, 0.06);
+		margin: 4px 8px;
+	}
+
+	/* Content area */
 	.content-area {
 		flex: 1;
-		min-height: 0;
-		position: relative;
-		background: white;
-		overflow: hidden;
-	}
-
-	.loading-bar {
-		position: absolute;
-		top: 0; left: 0; right: 0;
-		height: 2px;
-		background: transparent;
-		z-index: 10;
-		overflow: hidden;
-		pointer-events: none;
-	}
-	.loading-progress {
-		height: 100%;
-		width: 30%;
-		background: var(--win-accent);
-		animation: loading-slide 1.2s ease-in-out infinite;
-	}
-	@keyframes loading-slide {
-		0% { transform: translateX(-100%); }
-		100% { transform: translateX(400%); }
-	}
-
-	.page-frame {
-		width: 100%;
-		height: 100%;
-		border: 0;
-		display: block;
-		background: white;
+		overflow: auto;
+		background: #f5f5f5;
 	}
 
 	/* New tab page */
@@ -869,16 +1272,33 @@
 		flex-direction: column;
 		align-items: center;
 		padding: 60px 40px;
-		height: 100%;
-		overflow-y: auto;
-		background: #fafafa;
 	}
 
 	.newtab-greeting {
 		font-size: 28px;
 		font-weight: 300;
 		color: var(--win-text-primary);
-		margin-bottom: 24px;
+		margin-bottom: 28px;
+	}
+
+	.search-container {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 16px;
+		width: 100%;
+		max-width: 560px;
+		margin-bottom: 36px;
+	}
+
+	.bing-logo {
+		margin-bottom: 4px;
+	}
+
+	.bing-text {
+		font-size: 22px;
+		font-weight: 600;
+		color: var(--win-text-primary);
 	}
 
 	.newtab-search {
@@ -886,14 +1306,14 @@
 		align-items: center;
 		gap: 10px;
 		width: 100%;
-		max-width: 560px;
 		padding: 10px 18px;
 		background: white;
 		border: 1px solid rgba(0, 0, 0, 0.12);
 		border-radius: 24px;
 		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-		margin-bottom: 36px;
+		transition: box-shadow 0.2s ease;
 	}
+
 	.newtab-search:focus-within {
 		box-shadow: 0 2px 16px rgba(0, 0, 0, 0.1);
 		border-color: rgba(0, 0, 0, 0.16);
@@ -906,14 +1326,16 @@
 		font-size: 15px;
 		color: var(--win-text-primary);
 	}
-	.newtab-search-input::placeholder { color: var(--win-text-secondary); }
+
+	.newtab-search-input::placeholder {
+		color: var(--win-text-secondary);
+	}
 
 	.quick-links {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
-		gap: 16px;
-		max-width: 560px;
-		width: 100%;
+		display: flex;
+		gap: 20px;
+		flex-wrap: wrap;
+		justify-content: center;
 	}
 
 	.quick-link {
@@ -921,101 +1343,413 @@
 		flex-direction: column;
 		align-items: center;
 		gap: 8px;
-		padding: 12px 8px;
+		padding: 8px;
 		border-radius: var(--win-radius-md);
 		transition: background-color 0.1s ease;
 	}
-	.quick-link:hover { background: rgba(0, 0, 0, 0.04); }
+
+	.quick-link:hover {
+		background: rgba(0, 0, 0, 0.04);
+	}
 
 	.quick-link-icon {
-		width: 44px;
-		height: 44px;
+		width: 40px;
+		height: 40px;
 		border-radius: 50%;
-		background: white;
-		border: 1px solid rgba(0, 0, 0, 0.06);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		font-size: 22px;
+		font-size: 18px;
 	}
+
 	.quick-link-label {
 		font-size: 12px;
 		color: var(--win-text-primary);
-		text-align: center;
 	}
 
-	/* Bookmarks panel */
-	.bookmarks-panel {
-		position: absolute;
-		top: 96px;
-		right: 12px;
-		width: 320px;
-		max-height: 60%;
-		background: white;
-		border: 1px solid rgba(0, 0, 0, 0.08);
-		border-radius: 8px;
-		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
-		z-index: 50;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
+	/* Search results */
+	.search-results {
+		padding: 20px 40px;
+		max-width: 700px;
 	}
-	.bookmarks-panel-header {
-		padding: 12px 16px;
-		font-weight: 600;
-		font-size: 13px;
-		color: var(--win-text-primary);
+
+	.results-header {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		margin-bottom: 24px;
+		padding-bottom: 16px;
 		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 	}
-	.bookmarks-panel-list {
-		overflow-y: auto;
-		padding: 4px 0;
+
+	.bing-small {
+		font-size: 22px;
+		font-weight: 600;
+		color: var(--win-accent);
 	}
-	.bookmarks-panel-item {
-		display: flex;
-		align-items: center;
+
+	.results-query {
+		font-size: 14px;
+		color: var(--win-text-secondary);
 	}
-	.bookmarks-panel-link {
-		flex: 1;
+
+	.results-list {
 		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 8px 12px;
-		text-align: left;
+		flex-direction: column;
+		gap: 24px;
+	}
+
+	.result-item {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		cursor: pointer;
+		padding: 8px;
+		border-radius: 8px;
 		transition: background-color 0.1s ease;
 	}
-	.bookmarks-panel-link:hover { background: rgba(0, 0, 0, 0.04); }
-	.bookmarks-panel-text { flex: 1; min-width: 0; }
-	.bookmarks-panel-label {
+
+	.result-item:hover {
+		background: rgba(0, 0, 0, 0.03);
+	}
+
+	.result-url {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.result-title {
+		font-size: 18px;
+		color: var(--win-accent);
+		cursor: pointer;
+	}
+
+	.result-title:hover {
+		text-decoration: underline;
+	}
+
+	.result-desc {
 		font-size: 13px;
 		color: var(--win-text-primary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		line-height: 1.5;
 	}
-	.bookmarks-panel-url {
-		font-size: 11px;
+
+	/* Fake page content */
+	.fake-page {
+		height: 100%;
+		background: white;
+	}
+
+	.page-header-bar {
+		padding: 8px 20px;
+		background: #f8f8f8;
+		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+		font-size: 12px;
 		color: var(--win-text-secondary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
 	}
-	.bookmarks-panel-remove {
+
+	.page-domain {
+		font-weight: 500;
+	}
+
+	.page-body {
+		padding: 32px 40px;
+		max-width: 800px;
+	}
+
+	.page-title {
+		font-size: 28px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+		margin-bottom: 16px;
+	}
+
+	.page-text {
+		font-size: 15px;
+		line-height: 1.7;
+		color: var(--win-text-primary);
+		margin-bottom: 24px;
+	}
+
+	.page-placeholder {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.placeholder-block {
+		height: 14px;
+		background: rgba(0, 0, 0, 0.06);
+		border-radius: 4px;
+		width: 100%;
+	}
+
+	.placeholder-block.short {
+		width: 60%;
+	}
+
+	.placeholder-block.medium {
+		width: 80%;
+	}
+
+	/* Settings page */
+	.settings-page {
+		display: flex;
+		height: 100%;
+		background: #f5f5f5;
+	}
+
+	.settings-sidebar {
+		width: 240px;
+		background: white;
+		border-right: 1px solid rgba(0, 0, 0, 0.06);
+		padding: 20px 0;
+		flex-shrink: 0;
+		overflow-y: auto;
+	}
+
+	.settings-heading {
+		font-size: 20px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+		padding: 0 20px 16px;
+	}
+
+	.settings-nav {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.settings-nav-item {
+		text-align: left;
+		padding: 10px 20px;
+		font-size: 13px;
+		color: var(--win-text-primary);
+		transition: background-color 0.08s ease;
+		border-left: 3px solid transparent;
+	}
+
+	.settings-nav-item:hover {
+		background: rgba(0, 0, 0, 0.03);
+	}
+
+	.settings-nav-item.active {
+		border-left-color: var(--win-accent);
+		background: rgba(0, 120, 212, 0.04);
+		font-weight: 500;
+	}
+
+	.settings-content {
+		flex: 1;
+		padding: 24px 32px;
+		overflow-y: auto;
+	}
+
+	.settings-section-title {
+		font-size: 16px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+		margin-bottom: 12px;
+	}
+
+	.settings-card {
+		background: white;
+		border-radius: 8px;
+		border: 1px solid rgba(0, 0, 0, 0.06);
+		padding: 16px;
+		margin-bottom: 24px;
+	}
+
+	.settings-row {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+	}
+
+	.profile-avatar {
+		width: 48px;
+		height: 48px;
+		border-radius: 50%;
+		background: rgba(0, 120, 212, 0.1);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 24px;
+	}
+
+	.profile-name {
+		font-weight: 600;
+		font-size: 14px;
+		color: var(--win-text-primary);
+	}
+
+	.profile-email {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.settings-toggle-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 8px 0;
+		font-size: 13px;
+		color: var(--win-text-primary);
+		border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+	}
+
+	.settings-toggle-row:last-child {
+		border-bottom: none;
+	}
+
+	.toggle-label {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	/* Collections panel */
+	.collections-panel {
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 280px;
+		background: white;
+		border-left: 1px solid rgba(0, 0, 0, 0.08);
+		box-shadow: -2px 0 12px rgba(0, 0, 0, 0.08);
+		z-index: 30;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.collections-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 12px 16px;
+		border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+	}
+
+	.collections-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+	}
+
+	.collections-close {
 		width: 24px;
 		height: 24px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border-radius: 4px;
+		border-radius: var(--win-radius-sm);
 		color: var(--win-text-secondary);
-		margin-right: 8px;
+		transition: background-color 0.08s ease;
 	}
-	.bookmarks-panel-remove:hover { background: rgba(0, 0, 0, 0.06); }
-	.bookmarks-panel-empty {
-		padding: 16px;
+
+	.collections-close:hover {
+		background: rgba(0, 0, 0, 0.06);
+	}
+
+	.collections-body {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 32px;
+	}
+
+	.collections-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 12px;
+		text-align: center;
+	}
+
+	.collections-empty-text {
+		font-size: 14px;
+		font-weight: 500;
+		color: var(--win-text-primary);
+	}
+
+	.collections-empty-sub {
 		font-size: 12px;
 		color: var(--win-text-secondary);
-		text-align: center;
 		line-height: 1.5;
+	}
+
+	.collections-new-btn {
+		margin-top: 8px;
+		padding: 8px 16px;
+		font-size: 13px;
+		color: var(--win-accent);
+		border: 1px solid var(--win-accent);
+		border-radius: 4px;
+		transition: background-color 0.1s ease;
+	}
+
+	.collections-new-btn:hover {
+		background: rgba(0, 120, 212, 0.06);
+	}
+
+	/* Download section on fake pages */
+	.download-section {
+		margin-top: 32px;
+		padding-top: 24px;
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+	}
+
+	.download-section-title {
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+		margin-bottom: 12px;
+	}
+
+	.download-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.download-item {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 14px;
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: 6px;
+		background: #fafafa;
+		text-align: left;
+		cursor: pointer;
+		transition: background-color 0.1s ease, border-color 0.1s ease;
+	}
+
+	.download-item:hover {
+		background: rgba(0, 120, 212, 0.04);
+		border-color: rgba(0, 120, 212, 0.3);
+	}
+
+	.download-icon {
+		color: var(--win-accent);
+		flex-shrink: 0;
+	}
+
+	.download-item-info {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.download-item-name {
+		font-size: 13px;
+		color: var(--win-accent);
+		font-weight: 500;
+	}
+
+	.download-item-size {
+		font-size: 11px;
+		color: var(--win-text-secondary);
 	}
 </style>
