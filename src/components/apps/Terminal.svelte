@@ -1,8 +1,10 @@
 <script lang="ts">
+	import { onMount, onDestroy } from 'svelte';
 	import { vfs_store, resolve, ls, readFile, writeFile, stat, mkdir, rm, mv, cp, exists } from '../../state/vfs.svelte';
 	import type { FSNode } from '../../state/vfs.svelte';
 	import { notify } from '../../state/notifications.svelte';
 	import { copyText, pasteText } from '../../state/clipboard.svelte';
+	import { customTitleBars } from '../../state/titlebars.svelte';
 
 	interface TermTab {
 		id: number;
@@ -562,6 +564,32 @@
 		const tab = tabs.find((t) => t.id === activeTabId);
 		if (!tab) return;
 
+		// Ctrl+T: new PowerShell tab
+		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 't') {
+			e.preventDefault();
+			addTab('powershell');
+			return;
+		}
+
+		// Ctrl+W: close active tab
+		if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'w') {
+			e.preventDefault();
+			closeTab(activeTabId);
+			return;
+		}
+
+		// Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs
+		if ((e.ctrlKey || e.metaKey) && e.key === 'Tab') {
+			e.preventDefault();
+			if (tabs.length < 2) return;
+			const idx = tabs.findIndex((t) => t.id === activeTabId);
+			const nextIdx = e.shiftKey
+				? (idx - 1 + tabs.length) % tabs.length
+				: (idx + 1) % tabs.length;
+			switchTab(tabs[nextIdx].id);
+			return;
+		}
+
 		// Ctrl+Shift+C: copy selected terminal text to shared clipboard
 		if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
 			e.preventDefault();
@@ -578,12 +606,10 @@
 			e.preventDefault();
 			const text = pasteText();
 			if (text !== null) {
-				// Insert at cursor position in the input
 				if (inputRef) {
 					const start = inputRef.selectionStart ?? currentInput.length;
 					const end = inputRef.selectionEnd ?? currentInput.length;
 					currentInput = currentInput.slice(0, start) + text + currentInput.slice(end);
-					// Restore cursor position after paste
 					const newPos = start + text.length;
 					requestAnimationFrame(() => {
 						if (inputRef) {
@@ -679,13 +705,31 @@
 		historyIndex = -1;
 		focusInput();
 	}
+
+	function handleTabMouseDown(e: MouseEvent, id: number) {
+		// Middle-click closes a tab
+		if (e.button === 1) {
+			e.preventDefault();
+			e.stopPropagation();
+			closeTab(id);
+		}
+	}
+
+	// ── Register custom title bar with the WindowFrame ─────────────
+
+	onMount(() => {
+		customTitleBars.set('terminal', titleBar);
+	});
+
+	onDestroy(() => {
+		customTitleBars.clear('terminal');
+	});
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="terminal-app" onclick={() => { if (showDropdown) showDropdown = false; if (inputRef) inputRef.focus(); }}>
-	<!-- Tab bar -->
-	<div class="tab-bar">
+{#snippet titleBar()}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="terminal-titlebar">
 		<div class="tabs-row">
 			{#each tabs as tab (tab.id)}
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -693,22 +737,29 @@
 				<div
 					class="tab"
 					class:active={activeTabId === tab.id}
+					data-no-drag
 					onclick={(e) => { e.stopPropagation(); switchTab(tab.id); }}
+					onmousedown={(e) => handleTabMouseDown(e, tab.id)}
 				>
 					<span class="tab-icon">
 						{#if tab.type === 'powershell'}
-							<svg width="14" height="14" viewBox="0 0 14 14" fill="#01579B">
+							<svg width="14" height="14" viewBox="0 0 14 14" fill="#3A96DD">
 								<polygon points="1,2 8,7 1,12" />
-								<line x1="8" y1="10" x2="13" y2="10" stroke="#01579B" stroke-width="1.5" />
+								<line x1="8" y1="10" x2="13" y2="10" stroke="#3A96DD" stroke-width="1.5" />
 							</svg>
 						{:else if tab.type === 'cmd'}
-							<span style="font-size: 12px;">&#x2588;&gt;_</span>
+							<span style="font-size: 11px; color: rgba(255,255,255,0.85);">&#x2588;&gt;_</span>
 						{:else}
-							<span style="font-size: 12px; color: #0078D4;">&#9729;</span>
+							<span style="font-size: 12px; color: #3A96DD;">&#9729;</span>
 						{/if}
 					</span>
 					<span class="tab-title">{tab.title}</span>
-					<button class="tab-close" onclick={(e) => { e.stopPropagation(); closeTab(tab.id); }}>
+					<button
+						class="tab-close"
+						data-no-drag
+						aria-label="Close tab"
+						onclick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+					>
 						<svg width="8" height="8" viewBox="0 0 8 8">
 							<line x1="1" y1="1" x2="7" y2="7" stroke="currentColor" stroke-width="1" />
 							<line x1="7" y1="1" x2="1" y2="7" stroke="currentColor" stroke-width="1" />
@@ -716,39 +767,49 @@
 					</button>
 				</div>
 			{/each}
-		</div>
-		<div class="tab-actions">
-			<button class="new-tab-btn" onclick={(e) => { e.stopPropagation(); addTab('powershell'); }} title="New tab">
-				<svg width="12" height="12" viewBox="0 0 12 12">
+			<button
+				class="new-tab-btn"
+				data-no-drag
+				aria-label="New tab"
+				title="New tab (Ctrl+T)"
+				onclick={(e) => { e.stopPropagation(); addTab('powershell'); }}
+			>
+				<svg width="11" height="11" viewBox="0 0 12 12">
 					<line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.2" />
 					<line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.2" />
 				</svg>
 			</button>
-			<div class="dropdown-wrapper">
-				<button class="dropdown-btn" title="Open new tab type" onclick={(e) => { e.stopPropagation(); showDropdown = !showDropdown; }}>
+			<div class="dropdown-wrapper" data-no-drag>
+				<button
+					class="dropdown-btn"
+					data-no-drag
+					aria-label="Open new tab type"
+					title="Open new tab type"
+					onclick={(e) => { e.stopPropagation(); showDropdown = !showDropdown; }}
+				>
 					<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
 						<polygon points="2,3 5,7 8,3" />
 					</svg>
 				</button>
 				{#if showDropdown}
-					<div class="tab-type-dropdown">
-						<button class="tab-type-item" onclick={(e) => { e.stopPropagation(); addTab('powershell'); }}>
-							<svg width="14" height="14" viewBox="0 0 14 14" fill="#01579B">
+					<div class="tab-type-dropdown" data-no-drag>
+						<button class="tab-type-item" data-no-drag onclick={(e) => { e.stopPropagation(); addTab('powershell'); }}>
+							<svg width="14" height="14" viewBox="0 0 14 14" fill="#3A96DD">
 								<polygon points="1,2 8,7 1,12" />
-								<line x1="8" y1="10" x2="13" y2="10" stroke="#01579B" stroke-width="1.5" />
+								<line x1="8" y1="10" x2="13" y2="10" stroke="#3A96DD" stroke-width="1.5" />
 							</svg>
 							<span>Windows PowerShell</span>
 						</button>
-						<button class="tab-type-item" onclick={(e) => { e.stopPropagation(); addTab('cmd'); }}>
+						<button class="tab-type-item" data-no-drag onclick={(e) => { e.stopPropagation(); addTab('cmd'); }}>
 							<span style="font-size: 12px; width: 14px; text-align: center;">&#x2588;&gt;_</span>
 							<span>Command Prompt</span>
 						</button>
-						<button class="tab-type-item disabled">
-							<span style="font-size: 12px; width: 14px; text-align: center; color: #0078D4;">&#9729;</span>
+						<button class="tab-type-item" data-no-drag onclick={(e) => { e.stopPropagation(); addTab('azure'); }}>
+							<span style="font-size: 12px; width: 14px; text-align: center; color: #3A96DD;">&#9729;</span>
 							<span>Azure Cloud Shell</span>
 						</button>
 						<div class="dropdown-separator"></div>
-						<button class="tab-type-item" onclick={(e) => { e.stopPropagation(); showDropdown = false; }}>
+						<button class="tab-type-item" data-no-drag onclick={(e) => { e.stopPropagation(); showDropdown = false; }}>
 							<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.2">
 								<circle cx="7" cy="7" r="5.5" />
 								<line x1="7" y1="4" x2="7" y2="8" />
@@ -760,14 +821,19 @@
 				{/if}
 			</div>
 		</div>
+		<!-- Empty stretch zone keeps drag working in the space between tabs and window controls -->
+		<div class="drag-spacer"></div>
 	</div>
+{/snippet}
 
-	<!-- Terminal content -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="terminal-app" onclick={() => { if (showDropdown) showDropdown = false; if (inputRef) inputRef.focus(); }}>
 	<div class="terminal-content">
 		<div class="terminal-output" bind:this={outputRef}>
 			{#if activeTab}
 				{#each activeTab.history as line}
-					<div class="output-line">{line || '\u00A0'}</div>
+					<div class="output-line">{line || ' '}</div>
 				{/each}
 			{/if}
 			<div class="input-line">
@@ -795,44 +861,58 @@
 		font-family: 'Cascadia Code', 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
 	}
 
-	/* Tab bar */
-	.tab-bar {
+	/* ───── Title-bar tab strip (rendered by WindowFrame via snippet registry) ───── */
+
+	.terminal-titlebar {
+		flex: 1;
 		display: flex;
-		align-items: center;
-		justify-content: space-between;
+		align-items: stretch;
+		min-width: 0;
+		height: 100%;
 		background: #1F1F1F;
-		padding: 6px 8px 0;
-		min-height: 36px;
+		padding-left: 8px;
 	}
 
 	.tabs-row {
 		display: flex;
 		align-items: flex-end;
-		gap: 1px;
-		flex: 1;
+		gap: 2px;
+		min-width: 0;
 		overflow: hidden;
+		padding-top: 4px;
+	}
+
+	.drag-spacer {
+		flex: 1;
+		min-width: 24px;
 	}
 
 	.tab {
 		display: flex;
 		align-items: center;
 		gap: 6px;
-		padding: 5px 12px;
+		padding: 0 10px;
+		height: 28px;
 		font-size: 12px;
-		color: rgba(255, 255, 255, 0.6);
+		color: rgba(255, 255, 255, 0.65);
+		background: transparent;
 		border-radius: 6px 6px 0 0;
 		cursor: default;
-		transition: background-color 0.1s ease;
-		max-width: 200px;
+		transition: background-color 0.1s ease, color 0.1s ease;
+		max-width: 220px;
+		min-width: 80px;
+		flex-shrink: 1;
 	}
 
 	.tab:hover {
-		background: rgba(255, 255, 255, 0.05);
+		background: rgba(255, 255, 255, 0.06);
+		color: rgba(255, 255, 255, 0.85);
 	}
 
+	/* Active tab is "cut out" of the title bar — matches terminal body bg, extends to bottom edge. */
 	.tab.active {
 		background: #0C0C0C;
-		color: rgba(255, 255, 255, 0.9);
+		color: rgba(255, 255, 255, 0.95);
 	}
 
 	.tab-icon {
@@ -845,7 +925,9 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-size: 11px;
+		font-size: 12px;
+		flex: 1;
+		min-width: 0;
 	}
 
 	.tab-close {
@@ -855,53 +937,53 @@
 		align-items: center;
 		justify-content: center;
 		border-radius: 3px;
-		color: rgba(255, 255, 255, 0.4);
+		color: rgba(255, 255, 255, 0.5);
 		opacity: 0;
-		transition: all 0.08s ease;
+		transition: opacity 0.08s ease, background-color 0.08s ease, color 0.08s ease;
+		flex-shrink: 0;
 	}
 
-	.tab:hover .tab-close {
+	.tab:hover .tab-close,
+	.tab.active .tab-close {
 		opacity: 1;
 	}
 
 	.tab-close:hover {
-		background: rgba(255, 255, 255, 0.1);
-		color: rgba(255, 255, 255, 0.8);
-	}
-
-	.tab-actions {
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		padding-bottom: 4px;
+		background: rgba(255, 255, 255, 0.12);
+		color: rgba(255, 255, 255, 0.95);
 	}
 
 	.new-tab-btn,
 	.dropdown-btn {
-		width: 26px;
-		height: 26px;
+		width: 28px;
+		height: 28px;
+		margin-bottom: 0;
+		align-self: flex-end;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		border-radius: var(--win-radius-sm);
-		color: rgba(255, 255, 255, 0.6);
-		transition: background-color 0.08s ease;
+		color: rgba(255, 255, 255, 0.7);
+		transition: background-color 0.08s ease, color 0.08s ease;
+		flex-shrink: 0;
 	}
 
 	.new-tab-btn:hover,
 	.dropdown-btn:hover {
 		background: rgba(255, 255, 255, 0.08);
+		color: rgba(255, 255, 255, 0.95);
 	}
 
-	/* Tab type dropdown */
 	.dropdown-wrapper {
 		position: relative;
+		display: flex;
+		align-items: flex-end;
 	}
 
 	.tab-type-dropdown {
 		position: absolute;
-		top: 100%;
-		right: 0;
+		top: calc(100% + 4px);
+		left: 0;
 		min-width: 220px;
 		background: #2D2D2D;
 		border: 1px solid rgba(255, 255, 255, 0.1);
@@ -909,7 +991,6 @@
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 		padding: 4px;
 		z-index: 100;
-		margin-top: 4px;
 	}
 
 	.tab-type-item {
@@ -925,14 +1006,8 @@
 		transition: background-color 0.08s ease;
 	}
 
-	.tab-type-item:hover:not(.disabled) {
+	.tab-type-item:hover {
 		background: rgba(255, 255, 255, 0.08);
-	}
-
-	.tab-type-item.disabled {
-		color: rgba(255, 255, 255, 0.3);
-		cursor: not-allowed;
-		pointer-events: none;
 	}
 
 	.dropdown-separator {
@@ -941,7 +1016,8 @@
 		margin: 4px 8px;
 	}
 
-	/* Terminal content */
+	/* ───── Terminal body ───── */
+
 	.terminal-content {
 		flex: 1;
 		overflow: hidden;
