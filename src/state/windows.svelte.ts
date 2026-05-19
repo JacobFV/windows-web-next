@@ -363,6 +363,11 @@ class WindowManager {
 	selectedDesktopIcon = $state<number | null>(null);
 	autoArrangeIcons = $state<boolean>(false);
 	snapPreview = $state<SnapPreview | null>(null);
+	runDialogOpen = $state(false);
+	locked = $state(false);
+	altTabOpen = $state(false);
+	altTabIndex = $state(0);
+	taskViewOpen = $state(false);
 	/** Last position/size used by each app, restored on reopen. */
 	lastWindowStates = $state<Partial<Record<AppID, PersistedWindowState>>>({});
 
