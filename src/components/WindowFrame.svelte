@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	import AppIcon from './AppIcon.svelte';
 
 	let { appId, children }: { appId: AppID; children: Snippet } = $props();
 
@@ -313,7 +314,7 @@
 		ondblclick={handleDoubleClick}
 	>
 		<div class="title-bar-left">
-			<span class="window-icon">{config.icon}</span>
+			<span class="window-icon"><AppIcon id={appId} size={14} /></span>
 			<span class="window-title">{config.title}</span>
 		</div>
 
@@ -476,8 +477,9 @@
 	}
 
 	.window-icon {
-		font-size: 14px;
-		line-height: 1;
+		display: inline-flex;
+		align-items: center;
+		line-height: 0;
 		flex-shrink: 0;
 	}
 
