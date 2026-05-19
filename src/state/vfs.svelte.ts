@@ -157,12 +157,17 @@ function createDefaultFS(): Map<string, FSNode> {
 				]), new Date(2025, 1, 6, 8, 0))],
 
 				['Documents', dir('Documents', new Map([
-					['Meeting Notes.docx', file('Meeting Notes.docx', '', 250880, new Date(2025, 0, 28, 16, 22))],
+					['Meeting Notes.docx', file(
+						'Meeting Notes.docx',
+						'<h1>Meeting Notes — January 2025</h1><p><strong>Attendees:</strong> Alice, Bob, Carol, Dan</p><h2>Agenda</h2><ol><li>Project status update</li><li>Budget review</li><li>Q1 deliverables</li></ol><h2>Action Items</h2><ul><li>Alice to send the revised timeline by Friday</li><li>Bob to follow up with the design team</li><li>Carol to schedule the next review meeting</li></ul><p><em>Next meeting: Friday at 2pm.</em></p>',
+						undefined,
+						new Date(2025, 0, 28, 16, 22),
+					)],
 					['Resume.docx', file(
 						'Resume.docx',
-						'<h1>John Doe</h1><p>Software Engineer</p><h2>Experience</h2><p>Acme Corp 2020&ndash;Present</p>',
+						'<h1 style="text-align:center">Jane Doe</h1><p style="text-align:center">San Francisco, CA &middot; jane.doe@example.com &middot; (555) 123-4567</p><hr><h2>Summary</h2><p>Senior software engineer with 8+ years of experience building scalable web applications and leading cross-functional teams.</p><h2>Experience</h2><h3>Senior Engineer — Acme Corp</h3><p><em>2022 — Present</em></p><ul><li>Led migration of legacy monolith to microservices, reducing p99 latency by 40%.</li><li>Mentored four junior engineers and ran weekly architecture reviews.</li></ul><h3>Software Engineer — Globex Inc.</h3><p><em>2018 — 2022</em></p><ul><li>Shipped the customer dashboard used by 200k+ monthly active users.</li><li>Built the CI/CD pipeline that cut deploy times from 45 min to 6 min.</li></ul><h2>Education</h2><p><strong>B.S. Computer Science</strong>, State University, 2018</p><h2>Skills</h2><p>TypeScript, React, Svelte, Node.js, Python, PostgreSQL, AWS, Docker, Kubernetes.</p>',
 						undefined,
-						new Date(2025, 0, 20, 9, 0),
+						new Date(2025, 1, 1, 9, 0),
 					)],
 					['Quarterly Review.pptx', file(
 						'Quarterly Review.pptx',
