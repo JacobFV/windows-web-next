@@ -234,6 +234,44 @@ function deproxify(reqUrl: URL): { target: string | null; sessionId: string } {
 	};
 }
 
+function isProxyRoute(url: URL): boolean {
+	return url.pathname === '/api/proxy' || url.pathname.startsWith('/api/proxy/');
+}
+
+function isSameDeploymentProxy(url: URL, requestUrl: URL): boolean {
+	return url.origin === requestUrl.origin && isProxyRoute(url);
+}
+
+function normalizeNestedProxyTarget(requestUrl: URL, target: string, sessionId: string): { targetUrl: URL | null; sessionId: string; loop: boolean } {
+	let targetUrl: URL;
+	try {
+		targetUrl = new URL(target);
+	} catch {
+		return { targetUrl: null, sessionId, loop: false };
+	}
+
+	// Some upstream scripts build absolute URLs from document.location. In the
+	// iframe document.location is our /api/proxy URL, so those scripts can hand
+	// us https://our-app/api/proxy/https/... as a new target. Collapse that back
+	// to the real upstream target instead of letting Vercel fetch itself.
+	for (let depth = 0; depth < 8 && isSameDeploymentProxy(targetUrl, requestUrl); depth++) {
+		const inner = deproxify(targetUrl);
+		if (!inner.target) return { targetUrl, sessionId, loop: true };
+		if (sessionId === 'default' && inner.sessionId !== 'default') sessionId = inner.sessionId;
+		try {
+			targetUrl = new URL(inner.target);
+		} catch {
+			return { targetUrl: null, sessionId, loop: false };
+		}
+	}
+
+	return {
+		targetUrl,
+		sessionId,
+		loop: isSameDeploymentProxy(targetUrl, requestUrl),
+	};
+}
+
 function absolutize(maybeRelative: string, base: string): string | null {
 	if (!maybeRelative) return null;
 	// WHY skip these schemes: data: and blob: are inline content, javascript:
@@ -395,16 +433,50 @@ function injectClientScript(html: string, targetOrigin: string, sessionId: strin
 	const script = `<script>(function(){
 		var SESSION = ${safeSession};
 		var ORIGIN = ${safeOrigin};
+		var SELF_ORIGIN = window.location.origin;
 		// MUST match the server-side proxify() in api/proxy.ts. Path-based
 		// (not ?url=…) so webpack's publicPath auto-detect works for chunk loads.
 		// See the WHY comment on proxify() in api/proxy.ts for full reasoning.
+		function isProxyUrl(p) {
+			return p && p.origin === SELF_ORIGIN && (p.pathname === '/api/proxy' || p.pathname.indexOf('/api/proxy/') === 0);
+		}
+		function explicitProxyUrl(u) {
+			try {
+				if (u.indexOf('/api/proxy') === 0 || u.indexOf(SELF_ORIGIN + '/api/proxy') === 0 || u.indexOf('//') === 0) {
+					var p = new URL(u, location.href);
+					return isProxyUrl(p) ? p : null;
+				}
+			} catch(e) {}
+			return null;
+		}
+		function deproxify(p) {
+			try {
+				var legacy = p.searchParams.get('url');
+				if (legacy) return legacy;
+				var m = p.pathname.match(/^\\/api\\/proxy\\/(https?|http)\\/([^/]+)(\\/.*)?$/);
+				if (!m) return null;
+				var qs = new URLSearchParams(p.search);
+				qs.delete('__s');
+				qs.delete('session');
+				var query = qs.toString();
+				return m[1] + '://' + m[2] + (m[3] || '/') + (query ? '?' + query : '');
+			} catch(e) { return null; }
+		}
+		function upstreamUrlForMessage(u) {
+			try {
+				var p = new URL(u || location.href, location.href);
+				if (isProxyUrl(p)) return deproxify(p) || ORIGIN;
+				return new URL(u || location.href, ORIGIN).toString();
+			} catch(e) { return ORIGIN; }
+		}
 		function proxify(u){
 			try {
 				if (!u) return u;
 				if (typeof u !== 'string') u = String(u);
-				if (u.indexOf('/api/proxy') === 0) return u;
 				if (/^(data|blob|javascript|mailto|tel|about):/i.test(u)) return u;
 				if (u.charAt(0) === '#') return u;
+				var existing = explicitProxyUrl(u);
+				if (existing) return existing.pathname + existing.search + existing.hash;
 				var p = new URL(u, ORIGIN);
 				if (p.protocol !== 'http:' && p.protocol !== 'https:') return u;
 				var scheme = p.protocol.slice(0, -1);
@@ -457,12 +529,12 @@ function injectClientScript(html: string, targetOrigin: string, sessionId: strin
 		try {
 			var origPush = history.pushState;
 			history.pushState = function(s, t, u){
-				try { parent.postMessage({ __edge: true, type: 'nav', url: u ? new URL(u, ORIGIN).toString() : location.href }, '*'); } catch(e){}
+				try { parent.postMessage({ __edge: true, type: 'nav', url: upstreamUrlForMessage(u) }, '*'); } catch(e){}
 				return origPush.apply(this, arguments);
 			};
 			var origReplace = history.replaceState;
 			history.replaceState = function(s, t, u){
-				try { parent.postMessage({ __edge: true, type: 'nav', url: u ? new URL(u, ORIGIN).toString() : location.href }, '*'); } catch(e){}
+				try { parent.postMessage({ __edge: true, type: 'nav', url: upstreamUrlForMessage(u) }, '*'); } catch(e){}
 				return origReplace.apply(this, arguments);
 			};
 		} catch(e){}
@@ -586,7 +658,9 @@ export default async function handler(req: Request): Promise<Response> {
 	}
 
 	// Parse both URL formats (path-based + legacy ?url=…)
-	const { target, sessionId } = deproxify(url);
+	const parsed = deproxify(url);
+	const target = parsed.target;
+	let sessionId = parsed.sessionId;
 
 	// DELETE /api/proxy?__s=X — clear the cookie jar for that session
 	if (req.method === 'DELETE') {
@@ -602,11 +676,14 @@ export default async function handler(req: Request): Promise<Response> {
 		return new Response('Missing target URL (use /api/proxy/<scheme>/<host>/<path>)', { status: 400 });
 	}
 
-	let targetUrl: URL;
-	try {
-		targetUrl = new URL(target);
-	} catch {
+	const normalized = normalizeNestedProxyTarget(url, target, sessionId);
+	let targetUrl = normalized.targetUrl;
+	sessionId = normalized.sessionId;
+	if (!targetUrl) {
 		return new Response('Invalid target URL', { status: 400 });
+	}
+	if (normalized.loop) {
+		return new Response('Proxy loop detected', { status: 508 });
 	}
 	if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
 		return new Response('Only http(s) supported', { status: 400 });

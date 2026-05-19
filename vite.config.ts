@@ -3,6 +3,8 @@ import { defineConfig } from 'vite';
 import { browserslistToTargets } from 'lightningcss';
 import browserslist from 'browserslist';
 
+declare const process: { env: Record<string, string | undefined> };
+
 // During `pnpm dev`, vite doesn't serve our Vercel Edge functions (api/*.ts).
 // Without this proxy, /api/proxy and /api/session return the SPA's index.html,
 // which causes the Edge browser iframe to load this app recursively. Forward
