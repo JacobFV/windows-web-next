@@ -594,6 +594,6 @@
 	.resize-e  { right: -5px;  top: 13px;    bottom: 13px; width: 10px;  cursor: ew-resize; }
 	.resize-nw { top: -5px;    left: -5px;   width: 18px;  height: 18px; cursor: nwse-resize; }
 	.resize-ne { top: -5px;    right: -5px;  width: 18px;  height: 18px; cursor: nesw-resize; }
-	.resize-sw { bottom: -5px; left: -5px;   width: 18px;  height: 18px; cursor: nwse-resize; }
-	.resize-se { bottom: -5px; right: -5px;  width: 18px;  height: 18px; cursor: nesw-resize; }
+	.resize-sw { bottom: -5px; left: -5px;   width: 18px;  height: 18px; cursor: nesw-resize; }
+	.resize-se { bottom: -5px; right: -5px;  width: 18px;  height: 18px; cursor: nwse-resize; }
 </style>
