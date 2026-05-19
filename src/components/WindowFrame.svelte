@@ -578,18 +578,22 @@
 		border-radius: 0 0 var(--win-radius-md) var(--win-radius-md);
 	}
 
-	/* Edge handles extend slightly outside the frame so the grab zone straddles the border. */
+	/* Edge handles extend slightly outside the frame so the grab zone straddles
+	   the border. Edges and corners are placed so their bounding boxes butt up
+	   at x=13 / y=13 with no gap — otherwise there's a 1px dead zone where the
+	   cursor doesn't change. */
 	.resize-handle {
 		position: absolute;
 		z-index: 1000;
+		background: transparent;
 	}
 
-	.resize-n { top: -5px; left: 14px; right: 14px; height: 10px; cursor: ns-resize; }
-	.resize-s { bottom: -5px; left: 14px; right: 14px; height: 10px; cursor: ns-resize; }
-	.resize-w { left: -5px; top: 14px; bottom: 14px; width: 10px; cursor: ew-resize; }
-	.resize-e { right: -5px; top: 14px; bottom: 14px; width: 10px; cursor: ew-resize; }
-	.resize-nw { top: -5px; left: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
-	.resize-ne { top: -5px; right: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
-	.resize-sw { bottom: -5px; left: -5px; width: 18px; height: 18px; cursor: nwse-resize; }
-	.resize-se { bottom: -5px; right: -5px; width: 18px; height: 18px; cursor: nesw-resize; }
+	.resize-n  { top: -5px;    left: 13px;   right: 13px;  height: 10px; cursor: ns-resize; }
+	.resize-s  { bottom: -5px; left: 13px;   right: 13px;  height: 10px; cursor: ns-resize; }
+	.resize-w  { left: -5px;   top: 13px;    bottom: 13px; width: 10px;  cursor: ew-resize; }
+	.resize-e  { right: -5px;  top: 13px;    bottom: 13px; width: 10px;  cursor: ew-resize; }
+	.resize-nw { top: -5px;    left: -5px;   width: 18px;  height: 18px; cursor: nwse-resize; }
+	.resize-ne { top: -5px;    right: -5px;  width: 18px;  height: 18px; cursor: nesw-resize; }
+	.resize-sw { bottom: -5px; left: -5px;   width: 18px;  height: 18px; cursor: nwse-resize; }
+	.resize-se { bottom: -5px; right: -5px;  width: 18px;  height: 18px; cursor: nesw-resize; }
 </style>
