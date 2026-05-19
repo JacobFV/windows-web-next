@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	import AppIcon from './AppIcon.svelte';
 
 	interface PinnedApp {
 		id: AppID;
@@ -128,7 +129,7 @@
 			<div class="all-apps-list">
 				{#each allAppsList as app (app.id)}
 					<button class="all-apps-item" onclick={() => openApp(app.id)}>
-						<span class="all-apps-icon">{app.icon}</span>
+						<span class="all-apps-icon"><AppIcon id={app.id} size={32} /></span>
 						<span class="all-apps-label">{app.title}</span>
 					</button>
 				{/each}
@@ -149,7 +150,7 @@
 				<div class="pinned-grid">
 					{#each pinnedApps as app (app.id)}
 						<button class="pinned-item" onclick={() => openApp(app.id)}>
-							<span class="pinned-icon">{app.icon}</span>
+							<span class="pinned-icon"><AppIcon id={app.id} size={36} /></span>
 							<span class="pinned-label">{app.label}</span>
 						</button>
 					{/each}

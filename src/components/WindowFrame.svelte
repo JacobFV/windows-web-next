@@ -3,6 +3,7 @@
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
 	// Apps register a custom title-bar snippet here (e.g. Terminal renders its tabs in the title bar).
 	import { customTitleBars } from '../state/titlebars.svelte.ts';
+	import AppIcon from './AppIcon.svelte';
 
 	let { appId, children }: { appId: AppID; children: Snippet } = $props();
 
@@ -322,7 +323,7 @@
 			</div>
 		{:else}
 			<div class="title-bar-left">
-				<span class="window-icon">{config.icon}</span>
+				<span class="window-icon"><AppIcon id={appId} size={14} /></span>
 				<span class="window-title">{config.title}</span>
 			</div>
 		{/if}
@@ -502,8 +503,9 @@
 	}
 
 	.window-icon {
-		font-size: 14px;
-		line-height: 1;
+		display: inline-flex;
+		align-items: center;
+		line-height: 0;
 		flex-shrink: 0;
 	}
 

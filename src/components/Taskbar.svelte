@@ -4,6 +4,7 @@
 	import { taskbarControl } from '../state/taskbar-control.svelte.ts';
 	import NotificationCenter from './NotificationCenter.svelte';
 	import ToastContainer from './ToastContainer.svelte';
+	import AppIcon from './AppIcon.svelte';
 	import { onMount } from 'svelte';
 
 	let currentTime = $state('');
@@ -262,7 +263,7 @@
 				{:else if searchQuery.trim()}
 					{#each searchResults as app (app.id)}
 						<button class="search-result-item" onclick={() => openSearchResult(app.id)}>
-							<span class="search-result-icon">{app.icon}</span>
+							<span class="search-result-icon"><AppIcon id={app.id} size={28} /></span>
 							<span class="search-result-label">{app.title}</span>
 							<span class="search-result-type">App</span>
 						</button>
@@ -272,7 +273,7 @@
 						<span class="search-suggestion-title">Top apps</span>
 						{#each Object.values(appConfigs).slice(0, 4) as app (app.id)}
 							<button class="search-result-item" onclick={() => openSearchResult(app.id)}>
-								<span class="search-result-icon">{app.icon}</span>
+								<span class="search-result-icon"><AppIcon id={app.id} size={28} /></span>
 								<span class="search-result-label">{app.title}</span>
 								<span class="search-result-type">App</span>
 							</button>
@@ -401,7 +402,7 @@
 				onclick={() => handleAppClick(appId)}
 				title={config.title}
 			>
-				<span class="app-icon">{config.icon}</span>
+				<span class="app-icon"><AppIcon id={config.id} size={20} /></span>
 				{#if isOpen}
 					<span class="running-indicator" class:active-indicator={isActive}></span>
 				{/if}
