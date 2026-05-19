@@ -420,22 +420,35 @@ function injectClientScript(html: string, targetOrigin: string, sessionId: strin
 		}, true);
 	})();</script>`;
 
-	// WHY <base href>: collapses any leftover relative URLs we didn't catch
-	// (e.g. inside inline event handlers like onclick="location='foo'") down
-	// to the target origin. The injected fetch wrapper then catches them.
-	// Also: we use the EXACT target origin (scheme+host+port) so the browser
-	// resolves relative paths against the real site, not the proxy host.
-	const baseTag = `<base href="${escapeHtmlAttr(targetOrigin)}/">`;
+	// WHY we DON'T inject <base href="<target-origin>/">:
+	// Our rewriter turns every link/script/img/stylesheet src into a root-relative
+	// path like `/api/proxy?url=...`. A <base href="https://github.com/"> would
+	// make the browser resolve those against the TARGET origin (github.com),
+	// producing requests like https://github.com/api/proxy?url=... — which
+	// 404 at github and fail CORS. Without the base tag, root-relative paths
+	// resolve against the iframe's actual document URL (our proxy host), which
+	// is exactly what we want.
+	//
+	// What we lose by NOT setting <base>: relative URLs not starting with /
+	// (e.g. `href="foo.css"`) won't resolve correctly. But the static rewriter
+	// already absolutizes those at proxy-fetch time, and any runtime-added
+	// relative URLs hit the patched fetch/XHR/setAttribute wrappers in the
+	// injected script which absolutize via URL(u, ORIGIN). So this case is
+	// covered without breaking root-relative resolution.
+
+	// Strip any existing <base href> in the upstream HTML — leaving it would
+	// re-create the bug we just avoided.
+	const stripped = html.replace(/<base\b[^>]*>/gi, '');
 
 	// Inject right after the opening <head>, or fall back to right after <html>,
 	// or just prepend if neither exists.
-	if (/<head\b[^>]*>/i.test(html)) {
-		return html.replace(/(<head\b[^>]*>)/i, `$1${baseTag}${script}`);
+	if (/<head\b[^>]*>/i.test(stripped)) {
+		return stripped.replace(/(<head\b[^>]*>)/i, `$1${script}`);
 	}
-	if (/<html\b[^>]*>/i.test(html)) {
-		return html.replace(/(<html\b[^>]*>)/i, `$1<head>${baseTag}${script}</head>`);
+	if (/<html\b[^>]*>/i.test(stripped)) {
+		return stripped.replace(/(<html\b[^>]*>)/i, `$1<head>${script}</head>`);
 	}
-	return `<head>${baseTag}${script}</head>${html}`;
+	return `<head>${script}</head>${stripped}`;
 }
 
 function escapeHtmlAttr(s: string): string {

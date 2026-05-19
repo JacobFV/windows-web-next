@@ -1450,8 +1450,43 @@
 	/* Content area */
 	.content-area {
 		flex: 1;
-		overflow: auto;
+		overflow: hidden;
 		background: #f5f5f5;
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+	}
+
+	/* Iframe must fill its parent. Without these explicit rules it collapses
+	   to the default intrinsic size (~300x150) and the browser frame looks
+	   like a tiny widget. border:0 removes the default 2px iframe inset. */
+	.proxy-frame {
+		flex: 1;
+		width: 100%;
+		min-height: 0;
+		border: 0;
+		background: white;
+		display: block;
+	}
+
+	/* SSE status banner — small unobtrusive toast at the bottom-right rather
+	   than a full-width banner. The page still loads when SSE drops, so we
+	   shouldn't block the viewport with a full-bleed warning. */
+	.proxy-status-warn {
+		position: absolute;
+		right: 12px;
+		bottom: 12px;
+		max-width: 320px;
+		padding: 8px 12px;
+		background: rgba(255, 244, 206, 0.96);
+		border: 1px solid #d6b656;
+		border-radius: var(--win-radius-sm);
+		font-size: 11px;
+		color: #6b5a1a;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+		pointer-events: none;
+		z-index: 2;
 	}
 
 	/* New tab page */
