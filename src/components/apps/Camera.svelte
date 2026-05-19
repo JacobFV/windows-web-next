@@ -35,6 +35,16 @@
 	let recording = $state(false);
 	let recordChunks: Blob[] = [];
 
+	function cameraErrorMessage(e: unknown): string {
+		if (e instanceof DOMException && e.name === 'NotFoundError') {
+			return 'No camera was found on this device.';
+		}
+		if (e instanceof DOMException && e.name === 'NotAllowedError') {
+			return 'Camera access denied. Allow camera permission in your browser.';
+		}
+		return 'Camera is unavailable in this browser.';
+	}
+
 	async function startCamera() {
 		loading = true;
 		error = null;
@@ -49,8 +59,7 @@
 				await videoRef.play().catch(() => {});
 			}
 		} catch (e) {
-			console.warn('Camera error', e);
-			error = 'Camera access denied. Allow camera permission in your browser.';
+			error = cameraErrorMessage(e);
 		} finally {
 			loading = false;
 		}
@@ -130,7 +139,6 @@
 			recorder = rec;
 			recording = true;
 		} catch (e) {
-			console.warn('Record error', e);
 			notify({ appName: 'Camera', appIcon: '📷', title: 'Recording failed', body: String(e) });
 		}
 	}

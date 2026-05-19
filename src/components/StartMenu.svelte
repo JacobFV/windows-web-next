@@ -1,50 +1,34 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	import { openFile } from '../state/file-opener.svelte';
+	import { pinnedTaskbarApps } from '../configs/apps.ts';
 	import AppIcon from './AppIcon.svelte';
 
 	interface PinnedApp {
 		id: AppID;
 		label: string;
-		icon: string;
 	}
 
-	const pinnedApps: PinnedApp[] = [
-		{ id: 'edge', label: 'Edge', icon: '\uD83C\uDF10' },
-		{ id: 'file-explorer', label: 'File Explorer', icon: '\uD83D\uDCC1' },
-		{ id: 'mail', label: 'Mail', icon: '\uD83D\uDCE7' },
-		{ id: 'calendar', label: 'Calendar', icon: '\uD83D\uDCC5' },
-		{ id: 'store', label: 'Store', icon: '\uD83D\uDECD\uFE0F' },
-		{ id: 'settings', label: 'Settings', icon: '\u2699\uFE0F' },
-		{ id: 'notepad', label: 'Notepad', icon: '\uD83D\uDCDD' },
-		{ id: 'terminal', label: 'Terminal', icon: '\uD83D\uDCBB' },
-		{ id: 'calculator', label: 'Calculator', icon: '\uD83D\uDD22' },
-		{ id: 'photos', label: 'Photos', icon: '\uD83D\uDDBC\uFE0F' },
-		{ id: 'paint', label: 'Paint', icon: '\uD83C\uDFA8' },
-		{ id: 'clock', label: 'Clock', icon: '\uD83D\uDD50' },
-		{ id: 'weather', label: 'Weather', icon: '\uD83C\uDF24\uFE0F' },
-		{ id: 'maps', label: 'Maps', icon: '\uD83D\uDDFA\uFE0F' },
-		{ id: 'music', label: 'Music', icon: '\uD83C\uDFB5' },
-		{ id: 'videos', label: 'Videos', icon: '\uD83C\uDFAC' },
-		{ id: 'snipping-tool', label: 'Snipping Tool', icon: '\u2702\uFE0F' },
-		{ id: 'wordpad', label: 'WordPad', icon: '\uD83D\uDCC4' },
-		{ id: 'task-manager', label: 'Task Manager', icon: '\uD83D\uDCCA' },
-		{ id: 'disk-cleanup', label: 'Disk Cleanup', icon: '\uD83E\uDDF9' },
-	];
+	const pinnedApps: PinnedApp[] = pinnedTaskbarApps.map((id) => ({
+		id,
+		label: appConfigs[id].title,
+	}));
 
 	interface RecommendedItem {
 		name: string;
 		icon: string;
 		detail: string;
 		appId: AppID;
+		path?: string;
 	}
 
 	const recommendedItems: RecommendedItem[] = [
-		{ name: 'Project Notes.txt', icon: '\uD83D\uDCC4', detail: 'Yesterday', appId: 'notepad' },
-		{ name: 'Q4 Report.xlsx', icon: '\uD83D\uDCCA', detail: '2 days ago', appId: 'notepad' },
-		{ name: 'Vacation Photos', icon: '\uD83D\uDCC1', detail: 'Last week', appId: 'photos' },
-		{ name: 'Meeting Recording.mp4', icon: '\uD83C\uDFAC', detail: 'Last week', appId: 'photos' },
-		{ name: 'Budget 2025.xlsx', icon: '\uD83D\uDCCA', detail: '2 weeks ago', appId: 'notepad' },
-		{ name: 'Presentation.pptx', icon: '\uD83D\uDCD1', detail: '3 weeks ago', appId: 'notepad' },
+		{ name: 'notes.txt', icon: '\uD83D\uDCC4', detail: 'Yesterday', appId: 'notepad', path: 'C:/Users/User/Documents/notes.txt' },
+		{ name: 'Budget 2025.xlsx', icon: '\uD83D\uDCCA', detail: '2 days ago', appId: 'excel', path: 'C:/Users/User/Documents/Budget 2025.xlsx' },
+		{ name: 'Vacation Photos', icon: '\uD83D\uDCC1', detail: 'Last week', appId: 'file-explorer', path: 'C:/Users/User/Pictures/Vacation' },
+		{ name: 'tutorial.mp4', icon: '\uD83C\uDFAC', detail: 'Last week', appId: 'videos', path: 'C:/Users/User/Videos/tutorial.mp4' },
+		{ name: 'Meeting Notes.docx', icon: '\uD83D\uDCDD', detail: '2 weeks ago', appId: 'word', path: 'C:/Users/User/Documents/Meeting Notes.docx' },
+		{ name: 'Quarterly Review.pptx', icon: '\uD83D\uDCD1', detail: '3 weeks ago', appId: 'powerpoint', path: 'C:/Users/User/Documents/Quarterly Review.pptx' },
 	];
 
 	// All apps list (alphabetical)
@@ -53,13 +37,43 @@
 	let allAppsView = $state(false);
 	let powerMenuOpen = $state(false);
 	let userMenuOpen = $state(false);
+	let searchQuery = $state('');
+
+	let appSearchResults = $derived.by(() => {
+		const q = searchQuery.trim().toLowerCase();
+		if (!q) return [];
+		return allAppsList.filter((app) => app.title.toLowerCase().includes(q)).slice(0, 8);
+	});
+
+	let fileSearchResults = $derived.by(() => {
+		const q = searchQuery.trim().toLowerCase();
+		if (!q) return [];
+		return recommendedItems.filter((item) => item.name.toLowerCase().includes(q)).slice(0, 6);
+	});
 
 	function openApp(id: AppID) {
 		wm.openApp(id);
 	}
 
 	function openRecommended(item: RecommendedItem) {
+		if (item.path && openFile(item.path)) return;
 		wm.openApp(item.appId);
+	}
+
+	function openSearchApp(id: AppID) {
+		openApp(id);
+		searchQuery = '';
+	}
+
+	function handleSearchKey(e: KeyboardEvent) {
+		if (e.key !== 'Enter') return;
+		const firstApp = appSearchResults[0];
+		const firstFile = fileSearchResults[0];
+		if (firstApp) openSearchApp(firstApp.id);
+		else if (firstFile) {
+			openRecommended(firstFile);
+			searchQuery = '';
+		}
 	}
 
 	function toggleAllApps() {
@@ -110,11 +124,43 @@
 					<circle cx="9" cy="9" r="6" />
 					<line x1="13.5" y1="13.5" x2="18" y2="18" />
 				</svg>
-				<input type="text" placeholder="Search for apps, settings, and documents" class="search-input" />
+				<input
+					type="text"
+					placeholder="Search for apps, settings, and documents"
+					class="search-input"
+					bind:value={searchQuery}
+					onkeydown={handleSearchKey}
+				/>
 			</div>
 		</div>
 
-		{#if allAppsView}
+		{#if searchQuery.trim()}
+			<div class="start-search-results">
+				{#if appSearchResults.length > 0}
+					<div class="search-section-label">Apps</div>
+					{#each appSearchResults as app (app.id)}
+						<button class="start-search-item" onclick={() => openSearchApp(app.id)}>
+							<span class="search-result-icon"><AppIcon id={app.id} size={28} /></span>
+							<span class="search-result-title">{app.title}</span>
+							<span class="search-result-kind">App</span>
+						</button>
+					{/each}
+				{/if}
+				{#if fileSearchResults.length > 0}
+					<div class="search-section-label">Files</div>
+					{#each fileSearchResults as item (item.name)}
+						<button class="start-search-item" onclick={() => { openRecommended(item); searchQuery = ''; }}>
+							<span class="rec-icon">{item.icon}</span>
+							<span class="search-result-title">{item.name}</span>
+							<span class="search-result-kind">{item.detail}</span>
+						</button>
+					{/each}
+				{/if}
+				{#if appSearchResults.length === 0 && fileSearchResults.length === 0}
+					<div class="start-search-empty">No results found</div>
+				{/if}
+			</div>
+		{:else if allAppsView}
 			<!-- All Apps view -->
 			<div class="section-header">
 				<span class="section-title">All apps</span>
@@ -157,11 +203,11 @@
 				</div>
 			</div>
 
-			<!-- Recommended section -->
-			<div class="section-header">
-				<span class="section-title">Recommended</span>
-				<button class="more-btn">More &gt;</button>
-			</div>
+				<!-- Recommended section -->
+				<div class="section-header">
+					<span class="section-title">Recommended</span>
+					<button class="more-btn" onclick={() => { allAppsView = false; searchQuery = ''; }}>More &gt;</button>
+				</div>
 
 			<div class="recommended-list">
 				{#each recommendedItems as item, ri (item.name + '-' + ri)}
@@ -316,6 +362,63 @@
 
 	.search-input::placeholder {
 		color: var(--win-text-secondary);
+	}
+
+	.start-search-results {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 4px 20px 16px;
+		min-height: 310px;
+		max-height: 420px;
+		overflow-y: auto;
+	}
+
+	.search-section-label {
+		padding: 8px 8px 4px;
+		font-size: 11px;
+		font-weight: 600;
+		color: var(--win-text-secondary);
+		text-transform: uppercase;
+	}
+
+	.start-search-item {
+		display: grid;
+		grid-template-columns: 34px 1fr auto;
+		align-items: center;
+		gap: 10px;
+		padding: 8px 10px;
+		border-radius: var(--win-radius-sm);
+		text-align: left;
+	}
+
+	.start-search-item:hover {
+		background: rgba(0, 0, 0, 0.04);
+	}
+
+	.search-result-icon {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.search-result-title {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 13px;
+		color: var(--win-text-primary);
+	}
+
+	.search-result-kind,
+	.start-search-empty {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.start-search-empty {
+		padding: 18px 10px;
 	}
 
 	.section-header {

@@ -18,8 +18,13 @@
 		isSystem?: boolean;
 	}
 
-	// Mapping from AppID to process display info
-	const appProcessInfo: Partial<Record<AppID, { name: string; icon: string; cpu: number; memory: number; disk: number; network: number; pid: number }>> = {
+	type AppProcessInfo = Pick<Process, 'name' | 'icon' | 'cpu' | 'memory' | 'disk' | 'network'> & {
+		pid: number;
+	};
+
+	// Mapping from AppID to richer process display info. Apps not listed here
+	// still derive a stable process row from the central app registry.
+	const appProcessInfo: Partial<Record<AppID, AppProcessInfo>> = {
 		'edge': { name: 'Microsoft Edge', icon: '🌐', cpu: 3.2, memory: 812, disk: 0.1, network: 0.5, pid: 1024 },
 		'file-explorer': { name: 'File Explorer', icon: '📁', cpu: 0.1, memory: 42, disk: 0, network: 0, pid: 1436 },
 		'terminal': { name: 'Windows Terminal', icon: '💻', cpu: 0.4, memory: 128, disk: 0, network: 0, pid: 1848 },
@@ -29,6 +34,32 @@
 		'photos': { name: 'Photos', icon: '🖼️', cpu: 0.2, memory: 96, disk: 0, network: 0, pid: 6792 },
 		'task-manager': { name: 'Task Manager', icon: '📊', cpu: 0.3, memory: 34, disk: 0, network: 0, pid: 7204 },
 	};
+
+	function hashAppId(id: AppID): number {
+		let hash = 0;
+		for (let i = 0; i < id.length; i++) {
+			hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+		}
+		return hash;
+	}
+
+	function getAppProcessInfo(id: AppID): AppProcessInfo {
+		const known = appProcessInfo[id];
+		if (known) return known;
+
+		const config = appConfigs[id];
+		const hash = hashAppId(id);
+
+		return {
+			name: config?.title ?? id,
+			icon: config?.icon ?? '▣',
+			cpu: Number(((hash % 21) / 10).toFixed(1)),
+			memory: 24 + (hash % 224),
+			disk: Number(((hash >> 3) % 4 / 10).toFixed(1)),
+			network: Number(((hash >> 5) % 5 / 10).toFixed(1)),
+			pid: 8000 + (hash % 50000),
+		};
+	}
 
 	// Static system processes (always shown)
 	const systemProcesses: Process[] = [
@@ -46,7 +77,7 @@
 	// Derive process list from real open apps + system processes
 	let processes = $derived.by(() => {
 		const appProcesses: Process[] = wm.openApps.map((id) => {
-			const info = appProcessInfo[id];
+			const info = getAppProcessInfo(id);
 			return {
 				...info,
 				userName: 'User',

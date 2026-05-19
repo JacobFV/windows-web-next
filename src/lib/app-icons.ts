@@ -12,7 +12,7 @@
  *  - The wrapping <AppIcon> component sets `color: white` so currentColor renders white on the tile
  */
 
-import type { AppID } from '../state/windows.svelte.ts';
+import type { AppID } from '../configs/apps.ts';
 
 export interface IconSpec {
 	/** Optional tile background color (any valid CSS color). When omitted, tile is transparent. */
@@ -24,7 +24,7 @@ export interface IconSpec {
 // Common shared attributes that every icon string uses.
 const SVG_ATTRS = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
 
-export const APP_ICONS: Record<AppID, IconSpec> = {
+export const APP_ICONS: Partial<Record<AppID, IconSpec>> = {
 	'file-explorer': {
 		color: '#FFC107',
 		svg: `<svg ${SVG_ATTRS}>

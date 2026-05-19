@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { APP_ICONS } from '../lib/app-icons';
-	import type { AppID } from '../state/windows.svelte.ts';
+	import type { AppID } from '../configs/apps.ts';
 
 	let {
 		id,

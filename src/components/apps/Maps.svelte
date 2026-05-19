@@ -1,10 +1,16 @@
 <script lang="ts">
+	import { copyText } from '../../state/clipboard.svelte';
+
 	let searchQuery = $state('');
 	let showDirections = $state(false);
 	let fromLocation = $state('');
 	let toLocation = $state('');
 	let selectedPlace = $state<Place | null>(null);
 	let mapZoom = $state(12);
+	let directionMode = $state<'driving' | 'transit' | 'walking'>('driving');
+	let savedPlaces = $state<string[]>([]);
+	let shareMessage = $state<string | null>(null);
+	let shareTimeout: ReturnType<typeof setTimeout> | undefined;
 
 	interface Place {
 		name: string;
@@ -46,6 +52,35 @@
 		if (mapZoom > 1) mapZoom--;
 	}
 
+	let routeSummary = $derived.by(() => {
+		if (!showDirections || !toLocation.trim()) return null;
+		const modeData = {
+			driving: { label: 'Driving', eta: '12 min', distance: '2.8 mi' },
+			transit: { label: 'Transit', eta: '18 min', distance: '2.5 mi' },
+			walking: { label: 'Walking', eta: '34 min', distance: '1.7 mi' },
+		}[directionMode];
+		return {
+			...modeData,
+			from: fromLocation.trim() || 'Current location',
+			to: toLocation.trim(),
+		};
+	});
+
+	function savePlace(place: Place) {
+		if (!savedPlaces.includes(place.name)) {
+			savedPlaces = [...savedPlaces, place.name];
+		}
+	}
+
+	function sharePlace(place: Place) {
+		copyText(`${place.name} - ${place.address}`);
+		shareMessage = `${place.name} copied to clipboard`;
+		if (shareTimeout) clearTimeout(shareTimeout);
+		shareTimeout = setTimeout(() => {
+			shareMessage = null;
+		}, 1800);
+	}
+
 	function renderStars(rating: number): string {
 		const full = Math.floor(rating);
 		const half = rating % 1 >= 0.3 ? 1 : 0;
@@ -68,19 +103,26 @@
 						<input type="text" placeholder="To" class="direction-input" bind:value={toLocation} />
 					</div>
 					<div class="direction-actions">
-						<button class="direction-mode active" title="Driving">
+						<button class="direction-mode" class:active={directionMode === 'driving'} title="Driving" onclick={() => directionMode = 'driving'}>
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/></svg>
 						</button>
-						<button class="direction-mode" title="Transit">
+						<button class="direction-mode" class:active={directionMode === 'transit'} title="Transit" onclick={() => directionMode = 'transit'}>
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2c-4.42 0-8 .5-8 4v9.5C4 17.43 5.57 19 7.5 19L6 20.5v.5h12v-.5L16.5 19c1.93 0 3.5-1.57 3.5-3.5V6c0-3.5-3.58-4-8-4zM7.5 17c-.83 0-1.5-.67-1.5-1.5S6.67 14 7.5 14s1.5.67 1.5 1.5S8.33 17 7.5 17zm3.5-6H6V6h5v5zm5.5 6c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-6h-5V6h5v5z"/></svg>
 						</button>
-						<button class="direction-mode" title="Walking">
+						<button class="direction-mode" class:active={directionMode === 'walking'} title="Walking" onclick={() => directionMode = 'walking'}>
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M13.5 5.5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zM9.8 8.9L7 23h2.1l1.8-8 2.1 2v6h2v-7.5l-2.1-2 .6-3C14.8 12 16.8 13 19 13v-2c-1.9 0-3.5-1-4.3-2.4l-1-1.6c-.4-.6-1-1-1.7-1-.3 0-.5.1-.8.1L6 8.3V13h2V9.6l1.8-.7"/></svg>
 						</button>
 						<button class="close-directions" onclick={() => showDirections = false}>
 							<svg width="12" height="12" viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" /><line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" /></svg>
 						</button>
 					</div>
+					{#if routeSummary}
+						<div class="route-summary">
+							<strong>{routeSummary.eta}</strong>
+							<span>{routeSummary.distance} via {routeSummary.label}</span>
+							<span>{routeSummary.from} → {routeSummary.to}</span>
+						</div>
+					{/if}
 				</div>
 			{:else}
 				<div class="search-bar">
@@ -128,9 +170,14 @@
 						<button class="place-action-btn primary" onclick={() => { showDirections = true; toLocation = selectedPlace?.name || ''; }}>
 							Directions
 						</button>
-						<button class="place-action-btn">Save</button>
-						<button class="place-action-btn">Share</button>
+						<button class="place-action-btn" onclick={() => savePlace(selectedPlace!)}>
+							{savedPlaces.includes(selectedPlace.name) ? 'Saved' : 'Save'}
+						</button>
+						<button class="place-action-btn" onclick={() => sharePlace(selectedPlace!)}>Share</button>
 					</div>
+					{#if shareMessage}
+						<div class="share-message">{shareMessage}</div>
+					{/if}
 				</div>
 			{:else}
 				{#each filteredPlaces as place (place.name)}
@@ -318,6 +365,24 @@
 		color: white;
 	}
 
+	.route-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		margin-top: 8px;
+		padding: 10px 12px;
+		background: rgba(0, 120, 212, 0.08);
+		border: 1px solid rgba(0, 120, 212, 0.18);
+		border-radius: var(--win-radius-sm);
+		font-size: 12px;
+		color: var(--win-text-secondary);
+	}
+
+	.route-summary strong {
+		font-size: 16px;
+		color: var(--win-text-primary);
+	}
+
 	.close-directions {
 		width: 28px;
 		height: 28px;
@@ -495,6 +560,15 @@
 
 	.place-action-btn.primary:hover {
 		opacity: 0.9;
+	}
+
+	.share-message {
+		margin-top: 10px;
+		padding: 8px 10px;
+		border-radius: var(--win-radius-sm);
+		background: rgba(0, 120, 212, 0.08);
+		color: var(--win-accent);
+		font-size: 12px;
 	}
 
 	/* Map area */

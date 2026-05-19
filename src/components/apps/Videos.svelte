@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
+
 	interface Video {
 		id: number;
 		title: string;
@@ -13,6 +15,9 @@
 	let isPlaying = $state(false);
 	let viewMode = $state<'grid' | 'list'>('grid');
 	let sortBy = $state<'name' | 'date' | 'size'>('date');
+	let currentTime = $state(0);
+	let isFullscreen = $state(false);
+	let playbackInterval: ReturnType<typeof setInterval> | undefined;
 
 	const videos: Video[] = [
 		{ id: 1, title: 'Vacation Day 1 - Beach Sunset.mp4', duration: '2:34', thumbnail: '#e17055', size: '245 MB', date: 'Jan 15, 2025', resolution: '1920x1080' },
@@ -32,21 +37,72 @@
 	function openVideo(video: Video) {
 		selectedVideo = video;
 		isPlaying = false;
+		currentTime = 0;
 	}
 
 	function closeVideo() {
 		selectedVideo = null;
 		isPlaying = false;
+		currentTime = 0;
+		isFullscreen = false;
+		if (playbackInterval) clearInterval(playbackInterval);
 	}
 
 	function togglePlay() {
 		isPlaying = !isPlaying;
+		if (isPlaying) startPlaybackTicker();
+		else if (playbackInterval) clearInterval(playbackInterval);
 	}
+
+	function parseDuration(duration: string): number {
+		const parts = duration.split(':').map(Number);
+		if (parts.length === 2) return parts[0] * 60 + parts[1];
+		if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+		return 0;
+	}
+
+	function formatTime(seconds: number): string {
+		const mins = Math.floor(seconds / 60);
+		const secs = Math.floor(seconds % 60);
+		return `${mins}:${String(secs).padStart(2, '0')}`;
+	}
+
+	let selectedDurationSeconds = $derived(selectedVideo ? parseDuration(selectedVideo.duration) : 0);
+	let progressPercent = $derived(selectedDurationSeconds > 0 ? (currentTime / selectedDurationSeconds) * 100 : 0);
+
+	function startPlaybackTicker() {
+		if (playbackInterval) clearInterval(playbackInterval);
+		playbackInterval = setInterval(() => {
+			if (!selectedVideo) return;
+			if (currentTime >= selectedDurationSeconds) {
+				currentTime = selectedDurationSeconds;
+				isPlaying = false;
+				if (playbackInterval) clearInterval(playbackInterval);
+				return;
+			}
+			currentTime += 1;
+		}, 1000);
+	}
+
+	function seek(e: MouseEvent) {
+		if (!selectedVideo) return;
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+		currentTime = Math.round(selectedDurationSeconds * ratio);
+	}
+
+	function toggleFullscreen() {
+		isFullscreen = !isFullscreen;
+	}
+
+	onDestroy(() => {
+		if (playbackInterval) clearInterval(playbackInterval);
+	});
 </script>
 
 <div class="videos-app">
 	{#if selectedVideo}
-		<div class="video-player">
+		<div class="video-player" class:fullscreen={isFullscreen}>
 			<div class="player-header">
 				<button class="back-btn" onclick={closeVideo}>
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
@@ -79,11 +135,11 @@
 						<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
 					{/if}
 				</button>
-				<div class="progress-track">
-					<div class="progress-fill" style:width="35%"></div>
+				<div class="progress-track" onclick={seek}>
+					<div class="progress-fill" style:width="{progressPercent}%"></div>
 				</div>
-				<span class="time-label">0:53 / {selectedVideo.duration}</span>
-				<button class="ctrl-btn" title="Fullscreen">
+				<span class="time-label">{formatTime(currentTime)} / {selectedVideo.duration}</span>
+				<button class="ctrl-btn" title="Fullscreen" onclick={toggleFullscreen}>
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
 				</button>
 			</div>
@@ -380,6 +436,29 @@
 		height: 100%;
 		display: flex;
 		flex-direction: column;
+	}
+
+	.video-player.fullscreen {
+		position: fixed;
+		inset: 0;
+		z-index: 10050;
+		background: #000;
+		color: #fff;
+	}
+
+	.video-player.fullscreen .player-header,
+	.video-player.fullscreen .player-controls,
+	.video-player.fullscreen .video-info {
+		background: rgba(0, 0, 0, 0.72);
+		color: #fff;
+	}
+
+	.video-player.fullscreen .player-title,
+	.video-player.fullscreen .ctrl-btn,
+	.video-player.fullscreen .back-btn,
+	.video-player.fullscreen .info-label,
+	.video-player.fullscreen .info-value {
+		color: #fff;
 	}
 
 	.player-header {

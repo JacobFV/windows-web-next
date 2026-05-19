@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	import { pinnedTaskbarApps } from '../configs/apps.ts';
 	import { unreadCount } from '../state/notifications.svelte.ts';
 	import { taskbarControl } from '../state/taskbar-control.svelte.ts';
 	import NotificationCenter from './NotificationCenter.svelte';
@@ -10,11 +11,9 @@
 	let currentTime = $state('');
 	let currentDate = $state('');
 
-	const pinnedApps: AppID[] = ['file-explorer', 'edge', 'terminal'];
-
 	// All apps that should appear on taskbar: pinned + open (deduplicated)
 	let taskbarApps = $derived.by(() => {
-		const apps = new Set<AppID>(pinnedApps);
+		const apps = new Set<AppID>(pinnedTaskbarApps);
 		for (const id of wm.openApps) {
 			apps.add(id);
 		}

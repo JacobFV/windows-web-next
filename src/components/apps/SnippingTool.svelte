@@ -44,7 +44,7 @@
 	let isDrawing = $state(false);
 
 	let appRoot: HTMLElement;
-	let overlayEl: HTMLDivElement | null = null;
+	let overlayEl = $state<HTMLDivElement | null>(null);
 	let countdownTimeout: ReturnType<typeof setTimeout> | undefined;
 	let hiddenWindowEl: HTMLElement | null = null;
 

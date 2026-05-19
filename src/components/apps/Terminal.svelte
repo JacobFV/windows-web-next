@@ -719,6 +719,7 @@
 
 	onMount(() => {
 		customTitleBars.set('terminal', titleBar);
+		focusInput();
 	});
 
 	onDestroy(() => {
@@ -845,7 +846,6 @@
 					bind:this={inputRef}
 					onkeydown={handleKeyDown}
 					spellcheck="false"
-					autofocus
 				/>
 			</div>
 		</div>

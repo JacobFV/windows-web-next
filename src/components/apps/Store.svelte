@@ -1,5 +1,12 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { loadJSON, saveJSON, STORAGE_PREFIX } from '../../state/storage';
+	import { notify } from '../../state/notifications.svelte';
+	import { wm, type AppID } from '../../state/windows.svelte';
+
 	type StoreCategory = 'home' | 'apps' | 'games' | 'entertainment';
+
+	const K_STORE_INSTALLED = `${STORAGE_PREFIX}store-installed-apps`;
 
 	let activeCategory = $state<StoreCategory>('home');
 	let searchQuery = $state('');
@@ -16,19 +23,20 @@
 		category: StoreCategory;
 		installed: boolean;
 		description: string;
+		launchAppId?: AppID;
 	}
 
 	let apps = $state<StoreApp[]>([
-		{ id: 1, name: 'Spotify', developer: 'Spotify AB', rating: 4.5, reviews: '234K', price: 'Free', icon: 'S', color: '#1DB954', category: 'entertainment', installed: true, description: 'Music streaming service with millions of songs' },
+		{ id: 1, name: 'Spotify', developer: 'Spotify AB', rating: 4.5, reviews: '234K', price: 'Free', icon: 'S', color: '#1DB954', category: 'entertainment', installed: true, description: 'Music streaming service with millions of songs', launchAppId: 'music' },
 		{ id: 2, name: 'Netflix', developer: 'Netflix, Inc.', rating: 4.3, reviews: '156K', price: 'Free', icon: 'N', color: '#E50914', category: 'entertainment', installed: false, description: 'Watch TV shows, movies, and documentaries' },
 		{ id: 3, name: 'Discord', developer: 'Discord Inc.', rating: 4.4, reviews: '189K', price: 'Free', icon: 'D', color: '#5865F2', category: 'apps', installed: true, description: 'Chat, voice, and video for communities' },
-		{ id: 4, name: 'VS Code', developer: 'Microsoft', rating: 4.8, reviews: '312K', price: 'Free', icon: 'V', color: '#007ACC', category: 'apps', installed: true, description: 'Lightweight code editor with extensions' },
+		{ id: 4, name: 'VS Code', developer: 'Microsoft', rating: 4.8, reviews: '312K', price: 'Free', icon: 'V', color: '#007ACC', category: 'apps', installed: true, description: 'Lightweight code editor with extensions', launchAppId: 'vscode' },
 		{ id: 5, name: 'Minecraft', developer: 'Mojang Studios', rating: 4.6, reviews: '445K', price: '$26.99', icon: 'M', color: '#62B47A', category: 'games', installed: false, description: 'Build and explore infinite worlds' },
 		{ id: 6, name: 'Asphalt 9', developer: 'Gameloft', rating: 4.2, reviews: '98K', price: 'Free', icon: 'A', color: '#FF6B35', category: 'games', installed: false, description: 'High-speed racing with stunning graphics' },
-		{ id: 7, name: 'WhatsApp', developer: 'Meta', rating: 4.1, reviews: '267K', price: 'Free', icon: 'W', color: '#25D366', category: 'apps', installed: false, description: 'Fast and secure messaging' },
-		{ id: 8, name: 'Adobe Reader', developer: 'Adobe Inc.', rating: 4.0, reviews: '78K', price: 'Free', icon: 'A', color: '#FF0000', category: 'apps', installed: false, description: 'View and annotate PDF documents' },
+		{ id: 7, name: 'WhatsApp', developer: 'Meta', rating: 4.1, reviews: '267K', price: 'Free', icon: 'W', color: '#25D366', category: 'apps', installed: false, description: 'Fast and secure messaging', launchAppId: 'people' },
+		{ id: 8, name: 'Adobe Reader', developer: 'Adobe Inc.', rating: 4.0, reviews: '78K', price: 'Free', icon: 'A', color: '#FF0000', category: 'apps', installed: false, description: 'View and annotate PDF documents', launchAppId: 'edge' },
 		{ id: 9, name: 'Xbox', developer: 'Microsoft', rating: 4.3, reviews: '134K', price: 'Free', icon: 'X', color: '#107C10', category: 'games', installed: true, description: 'Xbox games and Game Pass on PC' },
-		{ id: 10, name: 'VLC Media Player', developer: 'VideoLAN', rating: 4.6, reviews: '201K', price: 'Free', icon: 'V', color: '#FF8800', category: 'entertainment', installed: true, description: 'Open-source multimedia player' },
+		{ id: 10, name: 'VLC Media Player', developer: 'VideoLAN', rating: 4.6, reviews: '201K', price: 'Free', icon: 'V', color: '#FF8800', category: 'entertainment', installed: true, description: 'Open-source multimedia player', launchAppId: 'videos' },
 		{ id: 11, name: 'Slack', developer: 'Salesforce', rating: 4.2, reviews: '112K', price: 'Free', icon: 'S', color: '#4A154B', category: 'apps', installed: false, description: 'Team communication and collaboration' },
 		{ id: 12, name: 'Candy Crush', developer: 'King', rating: 4.0, reviews: '567K', price: 'Free', icon: 'C', color: '#FF69B4', category: 'games', installed: false, description: 'Match-three puzzle game' },
 	]);
@@ -49,9 +57,60 @@
 
 	let featuredApps = $derived(apps.filter(a => a.rating >= 4.5).slice(0, 3));
 
-	function toggleInstall(app: StoreApp) {
-		app.installed = !app.installed;
-		apps = apps;
+	onMount(() => {
+		const savedInstalled = loadJSON<number[] | null>(K_STORE_INSTALLED, null);
+		if (!savedInstalled) return;
+		const installedIds = new Set(savedInstalled);
+		apps = apps.map((app) => ({ ...app, installed: installedIds.has(app.id) }));
+		if (selectedApp) selectedApp = apps.find((app) => app.id === selectedApp?.id) ?? null;
+	});
+
+	function persistInstalled(nextApps = apps) {
+		saveJSON(K_STORE_INSTALLED, nextApps.filter((app) => app.installed).map((app) => app.id));
+	}
+
+	function updateAppInstalled(appId: number, installed: boolean) {
+		apps = apps.map((app) => app.id === appId ? { ...app, installed } : app);
+		selectedApp = apps.find((app) => app.id === appId) ?? selectedApp;
+		persistInstalled(apps);
+	}
+
+	function installApp(app: StoreApp) {
+		updateAppInstalled(app.id, true);
+		notify({
+			appName: 'Microsoft Store',
+			appIcon: '🛍️',
+			title: `${app.name} installed`,
+			body: app.launchAppId ? 'You can open it from Microsoft Store now.' : 'The app is available in your library.',
+			action: app.launchAppId ? () => wm.openApp(app.launchAppId!) : undefined,
+		});
+	}
+
+	function uninstallApp(app: StoreApp) {
+		updateAppInstalled(app.id, false);
+		notify({
+			appName: 'Microsoft Store',
+			appIcon: '🛍️',
+			title: `${app.name} uninstalled`,
+			body: 'The install state has been updated.',
+		});
+	}
+
+	function handlePrimaryAction(app: StoreApp) {
+		if (!app.installed) {
+			installApp(app);
+			return;
+		}
+		if (app.launchAppId) {
+			wm.openApp(app.launchAppId);
+			return;
+		}
+		uninstallApp(app);
+	}
+
+	function primaryActionLabel(app: StoreApp): string {
+		if (!app.installed) return app.price === 'Free' ? 'Get' : 'Buy';
+		return app.launchAppId ? 'Open' : 'Uninstall';
 	}
 
 	function renderStars(rating: number): string {
@@ -117,13 +176,20 @@
 						</div>
 						<div class="detail-price">{selectedApp.price}</div>
 					</div>
-					<button
-						class="install-btn"
-						class:installed={selectedApp.installed}
-						onclick={() => toggleInstall(selectedApp!)}
-					>
-						{selectedApp.installed ? 'Installed' : selectedApp.price === 'Free' ? 'Get' : 'Buy'}
-					</button>
+					<div class="detail-actions">
+						<button
+							class="install-btn"
+							class:installed={selectedApp.installed}
+							onclick={() => handlePrimaryAction(selectedApp!)}
+						>
+							{primaryActionLabel(selectedApp)}
+						</button>
+						{#if selectedApp.installed && selectedApp.launchAppId}
+							<button class="secondary-action-btn" onclick={() => uninstallApp(selectedApp!)}>
+								Uninstall
+							</button>
+						{/if}
+					</div>
 				</div>
 
 				<div class="detail-description">
@@ -511,6 +577,13 @@
 		margin-top: 8px;
 	}
 
+	.detail-actions {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		flex-shrink: 0;
+	}
+
 	.install-btn:hover {
 		opacity: 0.9;
 	}
@@ -518,6 +591,22 @@
 	.install-btn.installed {
 		background: rgba(0, 0, 0, 0.06);
 		color: var(--win-text-secondary);
+	}
+
+	.secondary-action-btn {
+		padding: 10px 16px;
+		margin-top: 8px;
+		font-size: 13px;
+		font-weight: 600;
+		border-radius: var(--win-radius-sm);
+		background: rgba(0, 0, 0, 0.04);
+		color: var(--win-text-secondary);
+		border: 1px solid rgba(0, 0, 0, 0.08);
+	}
+
+	.secondary-action-btn:hover {
+		background: rgba(0, 0, 0, 0.08);
+		color: var(--win-text-primary);
 	}
 
 	.detail-description {

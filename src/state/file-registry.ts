@@ -83,13 +83,13 @@ const registry: Record<string, FileTypeInfo> = {
 	'.msi': { appId: null, typeLabel: 'Windows Installer', icon: '⚙️' },
 
 	// Media
-	'.mp3': { appId: null, typeLabel: 'MP3 Audio', icon: '🎵' },
-	'.wav': { appId: null, typeLabel: 'WAV Audio', icon: '🎵' },
-	'.flac': { appId: null, typeLabel: 'FLAC Audio', icon: '🎵' },
-	'.m3u': { appId: null, typeLabel: 'Playlist File', icon: '🎵' },
-	'.mp4': { appId: null, typeLabel: 'MP4 Video', icon: '🎬' },
-	'.avi': { appId: null, typeLabel: 'AVI Video', icon: '🎬' },
-	'.mkv': { appId: null, typeLabel: 'MKV Video', icon: '🎬' },
+	'.mp3': { appId: 'music', typeLabel: 'MP3 Audio', icon: '🎵' },
+	'.wav': { appId: 'music', typeLabel: 'WAV Audio', icon: '🎵' },
+	'.flac': { appId: 'music', typeLabel: 'FLAC Audio', icon: '🎵' },
+	'.m3u': { appId: 'music', typeLabel: 'Playlist File', icon: '🎵' },
+	'.mp4': { appId: 'videos', typeLabel: 'MP4 Video', icon: '🎬' },
+	'.avi': { appId: 'videos', typeLabel: 'AVI Video', icon: '🎬' },
+	'.mkv': { appId: 'videos', typeLabel: 'MKV Video', icon: '🎬' },
 	'.dmg': { appId: null, typeLabel: 'Disk Image', icon: '💿' },
 };
 

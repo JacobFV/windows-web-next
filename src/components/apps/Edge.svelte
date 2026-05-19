@@ -4,11 +4,13 @@
 	import { notify } from '../../state/notifications.svelte';
 	import { copyText } from '../../state/clipboard.svelte';
 
+	type ContentType = 'newtab' | 'search' | 'page' | 'settings' | 'proxy' | 'history' | 'downloads' | 'extensions';
+
 	interface HistoryEntry {
 		url: string;
 		title: string;
 		favicon: string;
-		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
+		contentType: ContentType;
 	}
 
 	interface Tab {
@@ -16,7 +18,7 @@
 		title: string;
 		url: string;
 		favicon: string;
-		contentType: 'newtab' | 'search' | 'page' | 'settings' | 'proxy';
+		contentType: ContentType;
 		searchQuery: string;
 		historyStack: HistoryEntry[];
 		historyIndex: number;
@@ -32,6 +34,25 @@
 		// error (e.g. the /api/session endpoint is unreachable). The UI
 		// downgrades to a non-interactive status indicator when true.
 		proxyStreamError: boolean;
+	}
+
+	interface DownloadRecord {
+		name: string;
+		path: string;
+		size: string;
+		time: string;
+	}
+
+	interface CollectionItem {
+		title: string;
+		url: string;
+		time: string;
+	}
+
+	interface Collection {
+		id: number;
+		name: string;
+		items: CollectionItem[];
 	}
 
 	// WHY postMessage origin '*': the iframe document is served from the same
@@ -87,6 +108,11 @@
 	let isLoading = $state(false);
 	let loadingProgress = $state(0);
 	let addressInputRef = $state<HTMLInputElement | null>(null);
+	let downloads = $state<DownloadRecord[]>([]);
+	let activeSettingsSection = $state('Profiles');
+	let collections = $state<Collection[]>([]);
+	let nextCollectionId = $state(1);
+	let selectedCollectionId = $state<number | null>(null);
 
 	let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
 	let canGoBack = $derived(activeTab ? activeTab.historyIndex > 0 : false);
@@ -152,7 +178,12 @@
 	// an open HTTP/2 stream against /api/session. Leaving them open after a
 	// tab closes wastes server-side function-invocation budget and triggers
 	// browser connection-limit throttling after ~6 tabs.
+	function shouldUseProxySession(tab: Tab): boolean {
+		return tab.contentType === 'proxy' || tab.proxyTarget !== null;
+	}
+
 	function openSessionStream(tab: Tab) {
+		if (!shouldUseProxySession(tab)) return;
 		closeSessionStream(tab.id);
 		let es: EventSource;
 		try {
@@ -185,6 +216,11 @@
 		tabStreams.set(tab.id, es);
 	}
 
+	function ensureSessionStream(tab: Tab) {
+		if (!shouldUseProxySession(tab) || tabStreams.has(tab.id)) return;
+		openSessionStream(tab);
+	}
+
 	function closeSessionStream(tabId: number) {
 		const es = tabStreams.get(tabId);
 		if (es) {
@@ -203,8 +239,8 @@
 		closeSessionStream(tab.id);
 		tab.sessionId = newSessionId();
 		tab.proxyStreamError = false;
-		openSessionStream(tab);
 		if (tab.contentType === 'proxy' && tab.proxyTarget) {
+			openSessionStream(tab);
 			// Force-reload the iframe at the new session id.
 			refresh();
 		}
@@ -219,9 +255,6 @@
 		addressValue = '';
 		showCollections = false;
 		showSettingsMenu = false;
-		// Open the SSE session for this tab eagerly so cookie/nav events from
-		// the very first proxy fetch are already wired up.
-		openSessionStream(newTab);
 	}
 
 	function closeTab(id: number) {
@@ -351,7 +384,7 @@
 
 	function navigateTab(
 		tab: Tab,
-		entry: { url: string; title: string; favicon: string; contentType: 'newtab' | 'search' | 'page' | 'settings' },
+		entry: HistoryEntry,
 		pageContent: { title: string; domain: string; body: string } | null = null,
 		searchQuery: string = ''
 	) {
@@ -365,11 +398,20 @@
 		tab.contentType = entry.contentType;
 		tab.pageContent = pageContent;
 		tab.searchQuery = searchQuery;
+		if (entry.contentType === 'proxy') {
+			tab.proxyTarget = entry.url;
+			ensureSessionStream(tab);
+		} else {
+			tab.proxyTarget = null;
+			tab.proxyStreamError = false;
+			closeSessionStream(tab.id);
+		}
 		tabs = tabs;
 	}
 
 	function navigateProxy(tab: Tab, target: string) {
 		tab.proxyTarget = target;
+		ensureSessionStream(tab);
 		simulateLoading(() => {
 			navigateTab(
 				tab,
@@ -439,6 +481,8 @@
 		tab.searchQuery = '';
 		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
 		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
+		if (entry.contentType === 'proxy') ensureSessionStream(tab);
+		else closeSessionStream(tab.id);
 		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
 	}
@@ -455,6 +499,8 @@
 		tab.searchQuery = '';
 		tab.pageContent = entry.contentType === 'page' ? getFakePageContent(entry.url) : null;
 		tab.proxyTarget = entry.contentType === 'proxy' ? entry.url : null;
+		if (entry.contentType === 'proxy') ensureSessionStream(tab);
+		else closeSessionStream(tab.id);
 		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
 		tabs = tabs;
 	}
@@ -483,6 +529,18 @@
 		addressValue = 'edge://settings';
 	}
 
+	function openInternalPage(contentType: Extract<ContentType, 'history' | 'downloads' | 'extensions'>, title: string, favicon: string) {
+		showSettingsMenu = false;
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		navigateTab(tab, { url: `edge://${contentType}`, title, favicon, contentType }, null);
+		addressValue = `edge://${contentType}`;
+	}
+
+	function openNewWindow() {
+		addTab();
+	}
+
 	function handleNewTabSearch() {
 		if (addressValue.trim()) handleNavigate();
 	}
@@ -498,10 +556,10 @@
 
 	const settingsMenuItems = [
 		{ label: 'New tab', icon: '📄', action: addTab },
-		{ label: 'New window', icon: '🪟', action: () => {} },
-		{ label: 'History', icon: '🕐', action: () => {} },
-		{ label: 'Downloads', icon: '⬇️', action: () => {} },
-		{ label: 'Extensions', icon: '🧩', action: () => {} },
+		{ label: 'New window', icon: '🪟', action: openNewWindow },
+		{ label: 'History', icon: '🕐', action: () => openInternalPage('history', 'History', '🕐') },
+		{ label: 'Downloads', icon: '⬇️', action: () => openInternalPage('downloads', 'Downloads', '⬇️') },
+		{ label: 'Extensions', icon: '🧩', action: () => openInternalPage('extensions', 'Extensions', '🧩') },
 		{ separator: true, label: '', icon: '', action: () => {} },
 		{ label: 'Refresh proxy session', icon: '🔄', action: refreshProxySession },
 		{ label: 'Settings', icon: '⚙️', action: openSettings },
@@ -535,6 +593,10 @@
 		const path = `C:/Users/User/Downloads/${file.name}`;
 		const success = writeFile(path, file.content);
 		if (success) {
+			downloads = [
+				{ name: file.name, path, size: 'Downloaded', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
+				...downloads.filter((d) => d.path !== path),
+			];
 			notify({
 				appName: 'Microsoft Edge',
 				appIcon: '🌐',
@@ -543,6 +605,59 @@
 			});
 		}
 	}
+
+	function createCollection() {
+		const collection: Collection = {
+			id: nextCollectionId++,
+			name: `Collection ${collections.length + 1}`,
+			items: [],
+		};
+		collections = [...collections, collection];
+		selectedCollectionId = collection.id;
+	}
+
+	function saveCurrentTabToCollection(collectionId: number) {
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab || tab.url === 'edge://newtab') return;
+		collections = collections.map((collection) => {
+			if (collection.id !== collectionId) return collection;
+			if (collection.items.some((item) => item.url === tab.url)) return collection;
+			return {
+				...collection,
+				items: [
+					{ title: tab.title, url: tab.url, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
+					...collection.items,
+				],
+			};
+		});
+	}
+
+	function openCollectionItem(item: CollectionItem) {
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		navigateProxy(tab, item.url);
+		showCollections = false;
+	}
+
+	function openHistoryEntry(entry: HistoryEntry) {
+		const tab = tabs.find((t) => t.id === activeTabId);
+		if (!tab) return;
+		if (entry.contentType === 'proxy') navigateProxy(tab, entry.url);
+		else navigateTab(tab, entry, entry.contentType === 'page' ? getFakePageContent(entry.url) : null);
+		addressValue = entry.url === 'edge://newtab' ? '' : entry.url;
+	}
+
+	let allHistoryEntries = $derived.by(() => {
+		const seen = new Set<string>();
+		return tabs
+			.flatMap((tab) => tab.historyStack)
+			.filter((entry) => {
+				if (entry.url === 'edge://newtab' || seen.has(entry.url)) return false;
+				seen.add(entry.url);
+				return true;
+			})
+			.reverse();
+	});
 
 	function handleEdgeKeyDown(e: KeyboardEvent) {
 		if (e.ctrlKey || e.metaKey) {
@@ -585,8 +700,7 @@
 		document.addEventListener('click', handleClickOutside);
 		window.addEventListener('message', handleIframeMessage);
 
-		// Open SSE streams for any pre-existing tabs (initial tab in $state).
-		for (const t of tabs) openSessionStream(t);
+		for (const t of tabs) ensureSessionStream(t);
 
 		return () => {
 			document.removeEventListener('click', handleClickOutside);
@@ -915,43 +1029,96 @@
 				<div class="settings-sidebar">
 					<h2 class="settings-heading">Settings</h2>
 					<div class="settings-nav">
-						<button class="settings-nav-item active">Profiles</button>
-						<button class="settings-nav-item">Privacy, search, and services</button>
-						<button class="settings-nav-item">Appearance</button>
-						<button class="settings-nav-item">Start, home, and new tabs</button>
-						<button class="settings-nav-item">Cookies and site permissions</button>
-						<button class="settings-nav-item">Downloads</button>
-						<button class="settings-nav-item">Languages</button>
-						<button class="settings-nav-item">System and performance</button>
-						<button class="settings-nav-item">About Microsoft Edge</button>
+						{#each ['Profiles', 'Privacy, search, and services', 'Appearance', 'Start, home, and new tabs', 'Cookies and site permissions', 'Downloads', 'Languages', 'System and performance', 'About Microsoft Edge'] as section}
+							<button
+								class="settings-nav-item"
+								class:active={activeSettingsSection === section}
+								onclick={() => (activeSettingsSection = section)}
+							>{section}</button>
+						{/each}
 					</div>
 				</div>
 				<div class="settings-content">
-					<h3 class="settings-section-title">Your profile</h3>
-					<div class="settings-card">
-						<div class="settings-row">
-							<div class="profile-avatar">👤</div>
-							<div class="profile-info">
-								<div class="profile-name">User</div>
-								<div class="profile-email">user@example.com</div>
+					{#if activeSettingsSection === 'Profiles'}
+						<h3 class="settings-section-title">Your profile</h3>
+						<div class="settings-card">
+							<div class="settings-row">
+								<div class="profile-avatar">👤</div>
+								<div class="profile-info">
+									<div class="profile-name">User</div>
+									<div class="profile-email">user@example.com</div>
+								</div>
 							</div>
 						</div>
+						<h3 class="settings-section-title">Profile settings</h3>
+						<div class="settings-card">
+							<div class="settings-toggle-row"><span>Sync</span><span class="toggle-label">On</span></div>
+							<div class="settings-toggle-row"><span>Password manager</span><span class="toggle-label">On</span></div>
+							<div class="settings-toggle-row"><span>Payment info</span><span class="toggle-label">Off</span></div>
+						</div>
+					{:else if activeSettingsSection === 'Downloads'}
+						<h3 class="settings-section-title">Downloads</h3>
+						<div class="settings-card">
+							<div class="settings-toggle-row"><span>Location</span><span class="toggle-label">C:/Users/User/Downloads</span></div>
+							<div class="settings-toggle-row"><span>Ask before downloading</span><span class="toggle-label">Off</span></div>
+						</div>
+					{:else if activeSettingsSection === 'About Microsoft Edge'}
+						<h3 class="settings-section-title">About Microsoft Edge</h3>
+						<div class="settings-card">
+							<div class="settings-toggle-row"><span>Version</span><span class="toggle-label">126.0.2592.0</span></div>
+							<div class="settings-toggle-row"><span>Status</span><span class="toggle-label">Up to date</span></div>
+						</div>
+					{:else}
+						<h3 class="settings-section-title">{activeSettingsSection}</h3>
+						<div class="settings-card">
+							<div class="settings-toggle-row"><span>Recommended protection</span><span class="toggle-label">On</span></div>
+							<div class="settings-toggle-row"><span>Personalization</span><span class="toggle-label">Balanced</span></div>
+							<div class="settings-toggle-row"><span>Site controls</span><span class="toggle-label">Managed</span></div>
+						</div>
+					{/if}
+				</div>
+			</div>
+		{:else if activeTab?.contentType === 'history'}
+			<div class="internal-page">
+				<h2>History</h2>
+				{#if allHistoryEntries.length === 0}
+					<p class="internal-empty">No browsing history yet.</p>
+				{:else}
+					<div class="internal-list">
+						{#each allHistoryEntries as entry (entry.url)}
+							<button class="internal-row" onclick={() => openHistoryEntry(entry)}>
+								<span class="menu-icon">{entry.favicon}</span>
+								<span class="internal-title">{entry.title}</span>
+								<span class="internal-url">{entry.url}</span>
+							</button>
+						{/each}
 					</div>
-					<h3 class="settings-section-title">Profile settings</h3>
-					<div class="settings-card">
-						<div class="settings-toggle-row">
-							<span>Sync</span>
-							<span class="toggle-label">On</span>
-						</div>
-						<div class="settings-toggle-row">
-							<span>Password manager</span>
-							<span class="toggle-label">On</span>
-						</div>
-						<div class="settings-toggle-row">
-							<span>Payment info</span>
-							<span class="toggle-label">Off</span>
-						</div>
+				{/if}
+			</div>
+		{:else if activeTab?.contentType === 'downloads'}
+			<div class="internal-page">
+				<h2>Downloads</h2>
+				{#if downloads.length === 0}
+					<p class="internal-empty">Files you download appear here.</p>
+				{:else}
+					<div class="internal-list">
+						{#each downloads as download (download.path)}
+							<div class="internal-row">
+								<span class="menu-icon">📄</span>
+								<span class="internal-title">{download.name}</span>
+								<span class="internal-url">{download.path} · {download.time}</span>
+							</div>
+						{/each}
 					</div>
+				{/if}
+			</div>
+		{:else if activeTab?.contentType === 'extensions'}
+			<div class="internal-page">
+				<h2>Extensions</h2>
+				<div class="settings-card">
+					<div class="settings-toggle-row"><span>Microsoft Editor</span><span class="toggle-label">On</span></div>
+					<div class="settings-toggle-row"><span>Web Capture</span><span class="toggle-label">On</span></div>
+					<div class="settings-toggle-row"><span>Shopping Assistant</span><span class="toggle-label">Off</span></div>
 				</div>
 			</div>
 		{/if}
@@ -986,11 +1153,32 @@
 						<line x1="3" y1="9" x2="21" y2="9" />
 						<line x1="9" y1="3" x2="9" y2="21" />
 					</svg>
-					<span class="collections-empty-text">No collections yet</span>
-					<span class="collections-empty-sub"
-						>Save pages, text, and images to collections to organize your ideas.</span
-					>
-					<button class="collections-new-btn">+ Start new collection</button>
+					{#if collections.length === 0}
+						<span class="collections-empty-text">No collections yet</span>
+						<span class="collections-empty-sub"
+							>Save pages, text, and images to collections to organize your ideas.</span
+						>
+						<button class="collections-new-btn" onclick={createCollection}>+ Start new collection</button>
+					{:else}
+						{#each collections as collection (collection.id)}
+							<div class="collection-card">
+								<button class="collection-title" onclick={() => selectedCollectionId = selectedCollectionId === collection.id ? null : collection.id}>
+									<span>{collection.name}</span>
+									<span>{collection.items.length}</span>
+								</button>
+								{#if selectedCollectionId === collection.id}
+									<button class="collections-new-btn" onclick={() => saveCurrentTabToCollection(collection.id)}>+ Add current page</button>
+									{#each collection.items as item (item.url)}
+										<button class="collection-item" onclick={() => openCollectionItem(item)}>
+											<span class="collection-item-title">{item.title}</span>
+											<span class="collection-item-url">{item.url}</span>
+										</button>
+									{/each}
+								{/if}
+							</div>
+						{/each}
+						<button class="collections-new-btn" onclick={createCollection}>+ New collection</button>
+					{/if}
 				</div>
 			</div>
 		</div>
@@ -1691,6 +1879,115 @@
 
 	.collections-new-btn:hover {
 		background: rgba(0, 120, 212, 0.06);
+	}
+
+	.collection-card {
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: 6px;
+		padding: 8px;
+		background: rgba(255, 255, 255, 0.6);
+	}
+
+	.collection-title,
+	.collection-item {
+		display: flex;
+		width: 100%;
+		text-align: left;
+		border-radius: 4px;
+	}
+
+	.collection-title {
+		justify-content: space-between;
+		font-weight: 600;
+		padding: 6px;
+	}
+
+	.collection-item {
+		flex-direction: column;
+		gap: 2px;
+		padding: 7px 8px;
+		background: rgba(0, 0, 0, 0.03);
+	}
+
+	.collection-item-title {
+		font-size: 12px;
+		color: var(--win-text-primary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.collection-item-url {
+		font-size: 11px;
+		color: var(--win-text-secondary);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.internal-page {
+		height: 100%;
+		padding: 28px 36px;
+		overflow: auto;
+		background: #fff;
+	}
+
+	.internal-page h2 {
+		margin: 0 0 18px;
+		font-size: 24px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+	}
+
+	.internal-empty {
+		color: var(--win-text-secondary);
+		font-size: 14px;
+	}
+
+	.internal-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		max-width: 840px;
+	}
+
+	.internal-row {
+		display: grid;
+		grid-template-columns: 28px 1fr;
+		grid-template-rows: auto auto;
+		gap: 2px 10px;
+		align-items: center;
+		text-align: left;
+		padding: 10px 12px;
+		border-radius: 6px;
+		border: 1px solid rgba(0, 0, 0, 0.06);
+		background: rgba(0, 0, 0, 0.02);
+	}
+
+	.internal-row:hover {
+		background: rgba(0, 120, 212, 0.06);
+	}
+
+	.internal-row .menu-icon {
+		grid-row: 1 / span 2;
+	}
+
+	.internal-title {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--win-text-primary);
+	}
+
+	.internal-url {
+		font-size: 12px;
+		color: var(--win-text-secondary);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	/* Download section on fake pages */

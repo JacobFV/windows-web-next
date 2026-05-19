@@ -18,8 +18,9 @@
 	let composeTo = $state('');
 	let composeSubject = $state('');
 	let composeBody = $state('');
+	let composeDraftId = $state<number | null>(null);
 
-	const emails: Email[] = [
+	let emails = $state<Email[]>([
 		{
 			id: 1, from: 'Alice Johnson', fromEmail: 'alice@example.com',
 			subject: 'Project Update - Q1 Review',
@@ -62,12 +63,14 @@
 			body: 'Thanks for sending the budget proposal. I have reviewed it and everything looks good to me.\n\nLet us proceed with the approved budget.\n\nBest,\nUser',
 			date: '3 days ago', read: true, starred: false, folder: 'sent',
 		},
-	];
+	]);
 
 	let filteredEmails = $derived(
 		emails.filter(e => {
 			if (selectedFolder === 'starred') return e.starred;
 			if (selectedFolder === 'sent') return e.folder === 'sent';
+			if (selectedFolder === 'drafts') return e.folder === 'drafts';
+			if (selectedFolder === 'trash') return e.folder === 'trash';
 			return e.folder === 'inbox';
 		})
 	);
@@ -84,36 +87,112 @@
 
 	function openEmail(email: Email) {
 		selectedEmail = email;
-		email.read = true;
+		emails = emails.map((item) => item.id === email.id ? { ...item, read: true } : item);
 	}
 
 	function toggleStar(e: MouseEvent, email: Email) {
 		e.stopPropagation();
-		email.starred = !email.starred;
+		emails = emails.map((item) => item.id === email.id ? { ...item, starred: !item.starred } : item);
+		if (selectedEmail?.id === email.id) selectedEmail = { ...selectedEmail, starred: !selectedEmail.starred };
 	}
 
 	function newEmail() {
 		composing = true;
+		composeDraftId = null;
 		composeTo = '';
 		composeSubject = '';
 		composeBody = '';
 		selectedEmail = null;
+	}
+
+	function nextId(): number {
+		return Math.max(0, ...emails.map((email) => email.id)) + 1;
 	}
 
 	function sendEmail() {
+		if (!composeTo.trim() || !composeSubject.trim()) return;
+		const sent: Email = {
+			id: nextId(),
+			from: 'You',
+			fromEmail: 'user@outlook.com',
+			subject: composeSubject.trim(),
+			preview: composeBody.trim().slice(0, 90) || '(No message body)',
+			body: composeBody.trim() || '(No message body)',
+			date: 'Just now',
+			read: true,
+			starred: false,
+			folder: 'sent',
+		};
+		emails = [
+			sent,
+			...emails.filter((email) => email.id !== composeDraftId),
+		];
 		composing = false;
 		composeTo = '';
 		composeSubject = '';
 		composeBody = '';
+		composeDraftId = null;
+		selectedFolder = 'sent';
+		selectedEmail = sent;
 	}
 
 	function discardCompose() {
+		if (composeDraftId !== null) {
+			emails = emails.filter((email) => email.id !== composeDraftId);
+		}
 		composing = false;
+		composeDraftId = null;
 	}
 
 	function goBack() {
+		if (composing && (composeTo.trim() || composeSubject.trim() || composeBody.trim())) {
+			const draft: Email = {
+				id: composeDraftId ?? nextId(),
+				from: 'You',
+				fromEmail: 'user@outlook.com',
+				subject: composeSubject.trim() || '(No subject)',
+				preview: composeBody.trim().slice(0, 90) || '(Draft)',
+				body: composeBody,
+				date: 'Draft',
+				read: true,
+				starred: false,
+				folder: 'drafts',
+			};
+			emails = [draft, ...emails.filter((email) => email.id !== draft.id)];
+			composeDraftId = draft.id;
+		}
 		selectedEmail = null;
 		composing = false;
+	}
+
+	function replyTo(email: Email) {
+		composing = true;
+		composeDraftId = null;
+		composeTo = email.fromEmail;
+		composeSubject = email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`;
+		composeBody = `\n\nOn ${email.date}, ${email.from} wrote:\n${email.body}`;
+	}
+
+	function forwardEmail(email: Email) {
+		composing = true;
+		composeDraftId = null;
+		composeTo = '';
+		composeSubject = email.subject.startsWith('Fwd:') ? email.subject : `Fwd: ${email.subject}`;
+		composeBody = `\n\n---------- Forwarded message ---------\nFrom: ${email.from} <${email.fromEmail}>\nDate: ${email.date}\nSubject: ${email.subject}\n\n${email.body}`;
+	}
+
+	function moveToTrash(email: Email) {
+		emails = emails.map((item) => item.id === email.id ? { ...item, folder: 'trash' } : item);
+		selectedEmail = null;
+	}
+
+	function openDraft(email: Email) {
+		composeDraftId = email.id;
+		composeTo = '';
+		composeSubject = email.subject === '(No subject)' ? '' : email.subject;
+		composeBody = email.body;
+		composing = true;
+		selectedEmail = null;
 	}
 </script>
 
@@ -199,8 +278,9 @@
 				</div>
 				<div class="detail-body">{selectedEmail.body}</div>
 				<div class="detail-actions">
-					<button class="reply-btn">Reply</button>
-					<button class="reply-btn">Forward</button>
+					<button class="reply-btn" onclick={() => replyTo(selectedEmail!)}>Reply</button>
+					<button class="reply-btn" onclick={() => forwardEmail(selectedEmail!)}>Forward</button>
+					<button class="reply-btn danger" onclick={() => moveToTrash(selectedEmail!)}>Delete</button>
 				</div>
 			</div>
 
@@ -215,7 +295,7 @@
 					<div
 						class="email-item"
 						class:unread={!email.read}
-						onclick={() => openEmail(email)}
+						onclick={() => email.folder === 'drafts' ? openDraft(email) : openEmail(email)}
 					>
 						<div class="email-avatar">{email.from[0]}</div>
 						<div class="email-content">
@@ -543,6 +623,11 @@
 
 	.reply-btn:hover {
 		background: rgba(0, 0, 0, 0.04);
+	}
+
+	.reply-btn.danger {
+		color: #b3261e;
+		border-color: rgba(179, 38, 30, 0.25);
 	}
 
 	/* Compose */

@@ -45,9 +45,29 @@
 		{ id: 2, time: '08:30', label: 'Meeting', enabled: false, days: 'Weekdays' },
 		{ id: 3, time: '22:00', label: 'Sleep reminder', enabled: true, days: 'Every day' },
 	]);
+	let addingAlarm = $state(false);
+	let newAlarmTime = $state('07:00');
+	let newAlarmLabel = $state('Alarm');
+	let newAlarmDays = $state('Every day');
 
 	function toggleAlarm(id: number) {
 		alarms = alarms.map(a => a.id === id ? { ...a, enabled: !a.enabled } : a);
+	}
+
+	function addAlarm() {
+		const id = Math.max(0, ...alarms.map((alarm) => alarm.id)) + 1;
+		alarms = [
+			...alarms,
+			{
+				id,
+				time: newAlarmTime,
+				label: newAlarmLabel.trim() || 'Alarm',
+				days: newAlarmDays,
+				enabled: true,
+			},
+		].sort((a, b) => a.time.localeCompare(b.time));
+		addingAlarm = false;
+		newAlarmLabel = 'Alarm';
 	}
 
 	// Timer
@@ -210,8 +230,22 @@
 			<div class="alarm-view">
 				<div class="alarm-header">
 					<h2 class="section-title">Alarms</h2>
-					<button class="add-btn" title="Add alarm">+</button>
+					<button class="add-btn" title="Add alarm" onclick={() => addingAlarm = !addingAlarm}>+</button>
 				</div>
+				{#if addingAlarm}
+					<div class="alarm-form">
+						<input class="alarm-time-input" type="time" bind:value={newAlarmTime} />
+						<input class="alarm-label-input" type="text" bind:value={newAlarmLabel} />
+						<select class="alarm-days-select" bind:value={newAlarmDays}>
+							<option>Every day</option>
+							<option>Weekdays</option>
+							<option>Weekends</option>
+							<option>Once</option>
+						</select>
+						<button class="control-btn primary" onclick={addAlarm}>Save</button>
+						<button class="control-btn" onclick={() => addingAlarm = false}>Cancel</button>
+					</div>
+				{/if}
 				<div class="alarm-list">
 					{#each alarms as alarm (alarm.id)}
 						<div class="alarm-item">
@@ -498,6 +532,28 @@
 
 	.add-btn:hover {
 		opacity: 0.9;
+	}
+
+	.alarm-form {
+		display: grid;
+		grid-template-columns: 110px 1fr 130px auto auto;
+		gap: 8px;
+		align-items: center;
+		padding: 12px;
+		background: rgba(255, 255, 255, 0.7);
+		border: 1px solid rgba(0, 0, 0, 0.06);
+		border-radius: var(--win-radius-sm);
+	}
+
+	.alarm-time-input,
+	.alarm-label-input,
+	.alarm-days-select {
+		height: 32px;
+		padding: 0 10px;
+		border: 1px solid rgba(0, 0, 0, 0.12);
+		border-radius: var(--win-radius-sm);
+		background: #fff;
+		color: var(--win-text-primary);
 	}
 
 	.alarm-list {

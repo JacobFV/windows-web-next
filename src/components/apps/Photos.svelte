@@ -97,8 +97,13 @@
 
 		const rawImages = collectImages(PICTURES_ROOT);
 
-		// Sort by modified date descending (newest first)
-		rawImages.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		if (sortMode === 'oldest') {
+			rawImages.sort((a, b) => a.modified.getTime() - b.modified.getTime());
+		} else if (sortMode === 'name') {
+			rawImages.sort((a, b) => a.name.localeCompare(b.name));
+		} else {
+			rawImages.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+		}
 
 		// Convert to PhotoItem with deterministic color/pattern from filename
 		const photos: PhotoItem[] = rawImages.map((img, i) => {
@@ -140,6 +145,8 @@
 	let viewerPhoto = $state<PhotoItem | null>(null);
 	let viewerZoom = $state(1);
 	let showImportDialog = $state(false);
+	let showOptionsMenu = $state(false);
+	let sortMode = $state<'newest' | 'oldest' | 'name'>('newest');
 
 	let totalPhotos = $derived(dateGroups.reduce((s, g) => s + g.photos.length, 0));
 
@@ -185,6 +192,7 @@
 
 	function toggleSelectMode() {
 		selectMode = !selectMode;
+		showOptionsMenu = false;
 		if (!selectMode) {
 			selectedPhotos = new Set();
 		}
@@ -207,6 +215,17 @@
 		if (viewerPhoto && !allPhotos.some((p) => p.id === viewerPhoto!.id)) {
 			viewerPhoto = null;
 		}
+	}
+
+	function selectAll() {
+		selectMode = true;
+		selectedPhotos = new Set(allPhotos.map((photo) => photo.id));
+		showOptionsMenu = false;
+	}
+
+	function setSortMode(mode: 'newest' | 'oldest' | 'name') {
+		sortMode = mode;
+		showOptionsMenu = false;
 	}
 
 	function navigateViewer(direction: 1 | -1) {
@@ -402,11 +421,23 @@
 						Delete
 					</button>
 				{/if}
-				<button class="tool-btn">
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"
-						><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" /></svg
-					>
-				</button>
+				<div class="options-wrapper">
+					<button class="tool-btn" class:active={showOptionsMenu} onclick={() => showOptionsMenu = !showOptionsMenu}>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"
+							><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" /></svg
+						>
+					</button>
+					{#if showOptionsMenu}
+						<div class="options-menu">
+							<button onclick={() => setSortMode('newest')} class:active={sortMode === 'newest'}>Newest first</button>
+							<button onclick={() => setSortMode('oldest')} class:active={sortMode === 'oldest'}>Oldest first</button>
+							<button onclick={() => setSortMode('name')} class:active={sortMode === 'name'}>Name</button>
+							<div class="options-separator"></div>
+							<button onclick={selectAll}>Select all</button>
+							<button onclick={() => { selectedPhotos = new Set(); showOptionsMenu = false; }}>Clear selection</button>
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 
@@ -614,6 +645,45 @@
 
 	.tool-btn.delete-btn:hover {
 		background: rgba(196, 43, 28, 0.08);
+	}
+
+	.options-wrapper {
+		position: relative;
+	}
+
+	.options-menu {
+		position: absolute;
+		top: calc(100% + 6px);
+		right: 0;
+		z-index: 20;
+		min-width: 160px;
+		display: flex;
+		flex-direction: column;
+		padding: 4px;
+		border: 1px solid rgba(0, 0, 0, 0.08);
+		border-radius: var(--win-radius-sm);
+		background: rgba(255, 255, 255, 0.96);
+		box-shadow: var(--win-shadow-flyout);
+	}
+
+	.options-menu button {
+		text-align: left;
+		padding: 7px 10px;
+		border-radius: 4px;
+		font-size: 12px;
+		color: var(--win-text-primary);
+	}
+
+	.options-menu button:hover,
+	.options-menu button.active {
+		background: rgba(0, 120, 212, 0.08);
+		color: var(--win-accent);
+	}
+
+	.options-separator {
+		height: 1px;
+		margin: 4px 2px;
+		background: rgba(0, 0, 0, 0.08);
 	}
 
 	/* Selection bar */

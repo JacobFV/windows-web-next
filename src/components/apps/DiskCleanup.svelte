@@ -31,8 +31,8 @@
 		{ id: 'delivery', name: 'Delivery Optimization Files', size: 456, description: 'Files used to deliver updates to other PCs.', selected: false, icon: 'delivery' },
 	]);
 
-	let totalDiskSize = 512000; // 512 GB in MB
-	let usedSpace = 285000; // 285 GB in MB
+	const totalDiskSize = 512000; // 512 GB in MB
+	let usedSpace = $state(285000); // 285 GB in MB
 
 	let selectedSize = $derived(categories.filter(c => c.selected).reduce((sum, c) => sum + c.size, 0));
 	let totalCleanable = $derived(categories.reduce((sum, c) => sum + c.size, 0));

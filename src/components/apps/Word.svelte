@@ -88,6 +88,7 @@
 	let lineSpacing = $state('1.15');
 	let zoom = $state(100);
 	let viewMode = $state<ViewMode>('print');
+	let isReadMode = $derived(viewMode === 'read');
 	let orientation = $state<Orientation>('portrait');
 	let columns = $state<ColumnsCount>(1);
 	let showRuler = $state(true);
@@ -153,6 +154,11 @@
 	let activeAlign = $state<'left' | 'center' | 'right' | 'justify'>('left');
 	let activeHeading = $state<'p' | 'h1' | 'h2' | 'h3'>('p');
 
+	// References
+	let footnoteCounter = $state(1);
+	let citationCounter = $state(1);
+	let captionCounter = $state(1);
+
 	// Autosave timer
 	let autosaveTimer: number | null = null;
 
@@ -161,9 +167,28 @@
 
 	// ── Helpers ────────────────────────────────────────────────────────
 
+	function selectionBelongsToEditor(selection: Selection | null): boolean {
+		if (!editorEl || !selection || selection.rangeCount === 0) return false;
+		const node = selection.getRangeAt(0).commonAncestorContainer;
+		return editorEl.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+	}
+
+	function ensureEditorSelection() {
+		if (!editorEl) return;
+		const selection = window.getSelection();
+		const hasEditorSelection = selectionBelongsToEditor(selection);
+		editorEl.focus();
+		if (hasEditorSelection) return;
+		const range = document.createRange();
+		range.selectNodeContents(editorEl);
+		range.collapse(false);
+		selection?.removeAllRanges();
+		selection?.addRange(range);
+	}
+
 	function exec(cmd: string, value?: string) {
+		ensureEditorSelection();
 		document.execCommand(cmd, false, value);
-		editorEl?.focus();
 		refreshAll();
 	}
 
@@ -178,6 +203,15 @@
 	function getEditorText(): string {
 		if (!editorEl) return '';
 		return editorEl.innerText || '';
+	}
+
+	function escapeHtml(value: string): string {
+		return value
+			.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;')
+			.replaceAll('"', '&quot;')
+			.replaceAll("'", '&#39;');
 	}
 
 	function updateCounts() {
@@ -574,6 +608,61 @@
 
 	function insertSymbol(sym: string) {
 		exec('insertText', sym);
+	}
+
+	// ── References ─────────────────────────────────────────────────────
+
+	function getDocumentHeadings() {
+		if (!editorEl) return [];
+		return Array.from(editorEl.querySelectorAll('h1, h2, h3'))
+			.map((el) => ({
+				level: Number(el.tagName.slice(1)),
+				text: (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+			}))
+			.filter((heading) => heading.text.length > 0);
+	}
+
+	function insertTableOfContents() {
+		const headings = getDocumentHeadings();
+		const items = headings.length
+			? headings
+			: [
+					{ level: 1, text: 'Introduction' },
+					{ level: 2, text: 'Key points' },
+					{ level: 2, text: 'Conclusion' },
+				];
+		const tocItems = items
+			.map((heading, index) => {
+				const indent = Math.max(0, heading.level - 1) * 18;
+				return `<div class="word-toc-row" style="padding-left:${indent}px"><span>${escapeHtml(heading.text)}</span><span class="word-toc-dots"></span><span>${index + 1}</span></div>`;
+			})
+			.join('');
+		exec('insertHTML', `<div class="word-toc"><strong>Table of Contents</strong>${tocItems}</div><p>&nbsp;</p>`);
+	}
+
+	function insertFootnote() {
+		const n = footnoteCounter++;
+		exec(
+			'insertHTML',
+			`<sup class="word-footnote-ref">[${n}]</sup><p class="word-footnote"><sup>${n}</sup> Footnote text.</p>`,
+		);
+	}
+
+	function insertCitation() {
+		const n = citationCounter++;
+		exec('insertHTML', `<span class="word-citation">(Author ${n}, 2026)</span>`);
+	}
+
+	function insertBibliography() {
+		exec(
+			'insertHTML',
+			`<h2>Bibliography</h2><p class="word-bibliography-entry">Author. (2026). <em>Title of source</em>. Publisher.</p>`,
+		);
+	}
+
+	function insertCaption() {
+		const n = captionCounter++;
+		exec('insertHTML', `<p class="word-caption"><strong>Figure ${n}.</strong> Caption text.</p>`);
 	}
 
 	// ── Headers / footers ──────────────────────────────────────────────
@@ -1194,7 +1283,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="word-app" class:dark={darkMode} class:read-mode={viewMode === 'read'}>
+<div class="word-app" class:dark={darkMode} class:read-mode={isReadMode}>
 	<input
 		bind:this={imageInputRef}
 		type="file"
@@ -1203,7 +1292,7 @@
 		onchange={handleImageSelected}
 	/>
 
-	{#if viewMode !== 'read'}
+	{#if !isReadMode}
 	<!-- ── Title bar ──────────────────────────────────────────────── -->
 	<div class="word-titlebar">
 		<div class="title-left">
@@ -1531,31 +1620,27 @@
 			</div>
 		{:else if activeTab === 'references'}
 			<div class="ribbon-group">
-				<button class="big-btn" disabled>
+				<button class="big-btn" onclick={insertTableOfContents}>
 					<span class="big-btn-icon">≡</span>
 					<span class="big-btn-label">Table of Contents</span>
 				</button>
-				<button class="big-btn" disabled>
+				<button class="big-btn" onclick={insertFootnote}>
 					<span class="big-btn-icon">⓭</span>
 					<span class="big-btn-label">Footnote</span>
 				</button>
-				<button class="big-btn" disabled>
+				<button class="big-btn" onclick={insertCitation}>
 					<span class="big-btn-icon">📑</span>
 					<span class="big-btn-label">Citation</span>
 				</button>
-				<button class="big-btn" disabled>
+				<button class="big-btn" onclick={insertBibliography}>
 					<span class="big-btn-icon">📚</span>
 					<span class="big-btn-label">Bibliography</span>
 				</button>
-				<button class="big-btn" disabled>
+				<button class="big-btn" onclick={insertCaption}>
 					<span class="big-btn-icon">🔖</span>
 					<span class="big-btn-label">Caption</span>
 				</button>
-				<div class="group-label">References (preview)</div>
-			</div>
-			<div class="ribbon-sep"></div>
-			<div class="ribbon-group">
-				<div class="muted-note">References features are placeholders in this MVP.</div>
+				<div class="group-label">References</div>
 			</div>
 		{:else if activeTab === 'view'}
 			<div class="ribbon-group">
@@ -1567,7 +1652,7 @@
 					<span class="big-btn-icon">🌐</span>
 					<span class="big-btn-label">Web Layout</span>
 				</button>
-				<button class="big-btn" class:active={viewMode === 'read'} onclick={() => setViewMode('read')}>
+				<button class="big-btn" class:active={isReadMode} onclick={() => setViewMode('read')}>
 					<span class="big-btn-icon">📖</span>
 					<span class="big-btn-label">Read Mode</span>
 				</button>
@@ -1653,7 +1738,7 @@
 	{/if}
 
 	<!-- ── Ruler ──────────────────────────────────────────────────── -->
-	{#if showRuler && viewMode !== 'read'}
+	{#if showRuler && !isReadMode}
 		<div class="ruler" style:width="{pageWidth * (zoom / 100)}px">
 			{#each Array(Math.floor(pageWidth / 96)) as _, i (i)}
 				<div class="ruler-tick">{i + 1}</div>
@@ -1664,7 +1749,7 @@
 
 	<!-- ── Main area (outline | doc) ───────────────────────────────── -->
 	<div class="word-body">
-		{#if showOutline && viewMode !== 'read'}
+		{#if showOutline && !isReadMode}
 			<aside class="outline-pane">
 				<div class="outline-header">
 					Navigation
@@ -1686,8 +1771,8 @@
 
 		<div class="document-scroll" class:webmode={viewMode === 'web'}>
 			<div class="document-stage" style:transform="scale({zoom / 100})" style:transform-origin="top center">
-				<div class="document-shell" class:webmode={viewMode === 'web'} class:readmode={viewMode === 'read'}>
-					{#if headerVisible && viewMode !== 'read'}
+				<div class="document-shell" class:webmode={viewMode === 'web'} class:readmode={isReadMode}>
+					{#if headerVisible && !isReadMode}
 						<div class="word-header-area" style:width="{pageWidth}px">
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<div
@@ -1705,7 +1790,7 @@
 						bind:this={editorEl}
 						class="word-page"
 						class:webmode={viewMode === 'web'}
-						class:readmode={viewMode === 'read'}
+						class:readmode={isReadMode}
 						style={editorStyle}
 						contenteditable="true"
 						oninput={onEditorInput}
@@ -1715,7 +1800,7 @@
 						onpaste={onEditorPaste}
 					></div>
 
-					{#if footerVisible && viewMode !== 'read'}
+					{#if footerVisible && !isReadMode}
 						<div class="word-footer-area" style:width="{pageWidth}px">
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
 							<div
@@ -1732,7 +1817,7 @@
 		</div>
 	</div>
 
-	{#if viewMode !== 'read'}
+	{#if !isReadMode}
 	<!-- ── Status bar ─────────────────────────────────────────────── -->
 	<div class="word-status">
 		<span class="status-cell">Page {Math.min(findMatchCount === 0 ? 1 : 1, pageCount)} of {pageCount}</span>
@@ -1752,7 +1837,7 @@
 	{/if}
 
 	<!-- ── Read-mode floating exit ────────────────────────────────── -->
-	{#if viewMode === 'read'}
+	{#if isReadMode}
 		<button class="read-exit" onclick={() => setViewMode('print')}>← Exit Read Mode</button>
 	{/if}
 
@@ -2393,6 +2478,54 @@
 	.word-page :global(.word-table th) {
 		background: #f3f2f1;
 		font-weight: 600;
+	}
+	.word-page :global(.word-toc) {
+		border: 1px solid #d0d0d0;
+		background: #faf9f8;
+		padding: 12px 14px;
+		margin: 12px 0;
+	}
+	.word-page :global(.word-toc strong) {
+		display: block;
+		margin-bottom: 8px;
+		color: #2b579a;
+	}
+	.word-page :global(.word-toc-row) {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		line-height: 1.5;
+	}
+	.word-page :global(.word-toc-dots) {
+		flex: 1;
+		border-bottom: 1px dotted #8a8886;
+		transform: translateY(-3px);
+	}
+	.word-page :global(.word-footnote-ref) {
+		color: #2b579a;
+		font-size: 0.75em;
+	}
+	.word-page :global(.word-footnote) {
+		border-top: 1px solid #c8c6c4;
+		color: #605e5c;
+		font-size: 10pt;
+		padding-top: 6px;
+		margin-top: 12px;
+	}
+	.word-page :global(.word-citation) {
+		background: #eff6fc;
+		color: #1f4f8c;
+		border-radius: 2px;
+		padding: 0 3px;
+	}
+	.word-page :global(.word-bibliography-entry) {
+		padding-left: 24px;
+		text-indent: -24px;
+	}
+	.word-page :global(.word-caption) {
+		color: #605e5c;
+		font-size: 10pt;
+		text-align: center;
 	}
 	.word-page :global(.word-image) {
 		max-width: 100%;

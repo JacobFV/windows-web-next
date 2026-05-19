@@ -57,6 +57,10 @@
 
 	let searchQuery = $state('');
 	let searchResults = $state<{ path: string; line: number; preview: string }[]>([]);
+	let runTarget = $state('Launch Web App');
+	let runOutput = $state<string[]>(['Ready to run workspace tasks.']);
+	let installedExtensions = $state<Set<string>>(new Set(['svelte']));
+	let extensionQuery = $state('');
 
 	let textareaRef = $state<HTMLTextAreaElement | null>(null);
 	let gutterRef = $state<HTMLPreElement | null>(null);
@@ -86,6 +90,25 @@
 		const out: string[] = [];
 		for (let i = 1; i <= count; i++) out.push(String(i));
 		return out.join('\n');
+	});
+
+	const sourceControlChanges = $derived(tabs.filter((tab) => tab.modified));
+
+	const extensionCatalog = [
+		{ id: 'svelte', name: 'Svelte for VS Code', publisher: 'Svelte', description: 'Syntax highlighting and language features for Svelte components.' },
+		{ id: 'prettier', name: 'Prettier', publisher: 'Prettier', description: 'Format JavaScript, TypeScript, CSS, and Markdown.' },
+		{ id: 'eslint', name: 'ESLint', publisher: 'Microsoft', description: 'Integrates ESLint diagnostics into the editor.' },
+		{ id: 'gitlens', name: 'GitLens', publisher: 'GitKraken', description: 'Repository history, blame, and file insights.' },
+	];
+
+	const filteredExtensions = $derived.by(() => {
+		const q = extensionQuery.trim().toLowerCase();
+		if (!q) return extensionCatalog;
+		return extensionCatalog.filter((ext) =>
+			ext.name.toLowerCase().includes(q) ||
+			ext.publisher.toLowerCase().includes(q) ||
+			ext.description.toLowerCase().includes(q)
+		);
 	});
 
 	const language = $derived.by(() => {
@@ -270,6 +293,43 @@
 			title: 'File saved',
 			body: tab.path,
 		});
+	}
+
+	function saveAll() {
+		for (const tab of tabs) {
+			if (!tab.modified) continue;
+			writeFile(tab.path, tab.content);
+			tab.modified = false;
+			tab.originalContent = tab.content;
+		}
+		tabs = tabs;
+		notify({ appName: 'VS Code', appIcon: '🔷', title: 'All files saved', body: `${ROOT_PATH}` });
+	}
+
+	function discardChanges(tab: EditorTab) {
+		tab.content = tab.originalContent;
+		tab.modified = false;
+		tabs = tabs;
+	}
+
+	function runWorkspace() {
+		const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+		const openName = activeTab?.title ?? 'workspace';
+		runOutput = [
+			`[${stamp}] ${runTarget}`,
+			`> pnpm ${runTarget === 'Run Tests' ? 'test' : runTarget === 'Build' ? 'build' : 'dev'}`,
+			`Using ${openName}`,
+			runTarget === 'Run Tests' ? '2 suites passed, 0 failed.' : runTarget === 'Build' ? 'Build completed successfully.' : 'Dev server ready at http://localhost:5173/',
+			'',
+			...runOutput,
+		].slice(0, 24);
+	}
+
+	function toggleExtension(id: string) {
+		const next = new Set(installedExtensions);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		installedExtensions = next;
 	}
 
 	function handleEditorInput(e: Event) {
@@ -706,21 +766,61 @@
 					</div>
 
 				{:else if activePanel === 'scm'}
-					<div class="placeholder-pane">
-						<p>No source control providers registered.</p>
-						<p class="muted">Initialize a repository to get started.</p>
+					<div class="tool-pane">
+						<div class="pane-actions">
+							<button class="search-run-btn" onclick={saveAll} disabled={sourceControlChanges.length === 0}>Commit Saved</button>
+						</div>
+						{#if sourceControlChanges.length === 0}
+							<div class="empty-hint">No source changes.</div>
+						{:else}
+							<div class="changes-list">
+								{#each sourceControlChanges as tab (tab.id)}
+									<div class="change-row">
+										<button class="change-file" onclick={() => openFileInTab(tab.path)}>
+											<span class="tree-icon">M</span>
+											<span>{tab.path.replace(ROOT_PATH + '/', '')}</span>
+										</button>
+										<button class="mini-action" onclick={() => discardChanges(tab)}>Discard</button>
+									</div>
+								{/each}
+							</div>
+						{/if}
 					</div>
 
 				{:else if activePanel === 'run'}
-					<div class="placeholder-pane">
-						<p>No configurations</p>
-						<p class="muted">Create a launch.json file to configure debugging.</p>
+					<div class="tool-pane">
+						<label class="pane-label" for="vscode-run-target">Configuration</label>
+						<select id="vscode-run-target" class="search-input" bind:value={runTarget}>
+							<option>Launch Web App</option>
+							<option>Run Tests</option>
+							<option>Build</option>
+						</select>
+						<button class="search-run-btn" onclick={runWorkspace}>Run</button>
+						<div class="terminal-output-panel">
+							{#each runOutput as line, i (`${i}-${line}`)}
+								<div>{line || '\u00a0'}</div>
+							{/each}
+						</div>
 					</div>
 
 				{:else if activePanel === 'extensions'}
-					<div class="placeholder-pane">
-						<input class="search-input" placeholder="Search Extensions in Marketplace" />
-						<p class="muted">No extensions installed.</p>
+					<div class="tool-pane">
+						<input class="search-input" placeholder="Search Extensions in Marketplace" bind:value={extensionQuery} />
+						<div class="extensions-list">
+							{#each filteredExtensions as ext (ext.id)}
+								<div class="extension-row">
+									<div class="extension-icon">{ext.name[0]}</div>
+									<div class="extension-info">
+										<strong>{ext.name}</strong>
+										<span>{ext.publisher}</span>
+										<p>{ext.description}</p>
+									</div>
+									<button class="mini-action" onclick={() => toggleExtension(ext.id)}>
+										{installedExtensions.has(ext.id) ? 'Uninstall' : 'Install'}
+									</button>
+								</div>
+							{/each}
+						</div>
 					</div>
 				{/if}
 			</div>
@@ -771,9 +871,8 @@
 					onkeyup={handleEditorSelect}
 					spellcheck="false"
 					autocomplete="off"
-					autocorrect="off"
 					autocapitalize="off"
-					wrap="off"
+					wrap="soft"
 					bind:this={textareaRef}
 				></textarea>
 			{:else}
@@ -1014,17 +1113,12 @@
 		color: #858585;
 	}
 
-	.placeholder-pane {
+	.tool-pane {
 		padding: 12px;
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
 		font-size: 13px;
-	}
-
-	.placeholder-pane .muted {
-		color: #858585;
-		font-size: 12px;
 	}
 
 	.search-pane {
@@ -1061,6 +1155,110 @@
 
 	.search-run-btn:hover {
 		background: #1177bb;
+	}
+
+	.search-run-btn:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+
+	.pane-actions {
+		display: flex;
+		gap: 6px;
+	}
+
+	.pane-label {
+		font-size: 11px;
+		color: #bbbbbb;
+	}
+
+	.changes-list,
+	.extensions-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.change-row,
+	.extension-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 7px;
+		background: rgba(255, 255, 255, 0.04);
+		border-radius: 3px;
+	}
+
+	.change-file {
+		flex: 1;
+		display: flex;
+		gap: 8px;
+		text-align: left;
+		color: #d4d4d4;
+		min-width: 0;
+	}
+
+	.change-file span:last-child {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.mini-action {
+		padding: 3px 7px;
+		border-radius: 2px;
+		background: #3c3c3c;
+		color: #d4d4d4;
+		font-size: 11px;
+	}
+
+	.mini-action:hover {
+		background: #4a4a4a;
+	}
+
+	.terminal-output-panel {
+		min-height: 160px;
+		padding: 8px;
+		background: #0c0c0c;
+		color: #d4d4d4;
+		font-family: 'Cascadia Mono', 'Consolas', monospace;
+		font-size: 12px;
+		overflow: auto;
+		border-radius: 3px;
+	}
+
+	.extension-icon {
+		width: 34px;
+		height: 34px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 6px;
+		background: #0e639c;
+		color: white;
+		font-weight: 700;
+		flex-shrink: 0;
+	}
+
+	.extension-info {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.extension-info strong {
+		color: #d4d4d4;
+		font-size: 12px;
+	}
+
+	.extension-info span,
+	.extension-info p {
+		margin: 0;
+		color: #9d9d9d;
+		font-size: 11px;
+		line-height: 1.3;
 	}
 
 	.search-results {
