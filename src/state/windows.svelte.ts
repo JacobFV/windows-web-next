@@ -32,7 +32,17 @@ export type AppID =
 	| 'store'
 	| 'snipping-tool'
 	| 'wordpad'
-	| 'disk-cleanup';
+	| 'word'
+	| 'powerpoint'
+	| 'disk-cleanup'
+	| 'excel'
+	| 'vscode'
+	| 'dev-utils'
+	| 'sticky-notes'
+	| 'todo'
+	| 'people'
+	| 'news'
+	| 'camera';
 
 export interface WindowState {
 	x: number;
@@ -277,6 +287,106 @@ export const appConfigs: Record<AppID, AppConfig> = {
 		minHeight: 400,
 		pinned: false,
 	},
+	excel: {
+		id: 'excel',
+		title: 'Excel',
+		icon: '📊',
+		defaultWidth: 1100,
+		defaultHeight: 700,
+		minWidth: 600,
+		minHeight: 400,
+		pinned: false,
+	},
+	word: {
+		id: 'word',
+		title: 'Word',
+		icon: '📝',
+		defaultWidth: 1100,
+		defaultHeight: 700,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
+	powerpoint: {
+		id: 'powerpoint',
+		title: 'PowerPoint',
+		icon: '📽️',
+		defaultWidth: 1200,
+		defaultHeight: 720,
+		minWidth: 600,
+		minHeight: 450,
+		pinned: false,
+	},
+	vscode: {
+		id: 'vscode',
+		title: 'Visual Studio Code',
+		icon: '🔷',
+		defaultWidth: 1100,
+		defaultHeight: 700,
+		minWidth: 700,
+		minHeight: 400,
+		pinned: true,
+	},
+	'dev-utils': {
+		id: 'dev-utils',
+		title: 'DevUtils',
+		icon: '🛠️',
+		defaultWidth: 900,
+		defaultHeight: 620,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
+	'sticky-notes': {
+		id: 'sticky-notes',
+		title: 'Sticky Notes',
+		icon: '🟡',
+		defaultWidth: 500,
+		defaultHeight: 500,
+		minWidth: 350,
+		minHeight: 300,
+		pinned: false,
+	},
+	todo: {
+		id: 'todo',
+		title: 'Microsoft To Do',
+		icon: '✅',
+		defaultWidth: 850,
+		defaultHeight: 600,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
+	people: {
+		id: 'people',
+		title: 'People',
+		icon: '👥',
+		defaultWidth: 900,
+		defaultHeight: 600,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
+	news: {
+		id: 'news',
+		title: 'News',
+		icon: '📰',
+		defaultWidth: 1000,
+		defaultHeight: 680,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
+	camera: {
+		id: 'camera',
+		title: 'Camera',
+		icon: '📷',
+		defaultWidth: 800,
+		defaultHeight: 560,
+		minWidth: 500,
+		minHeight: 400,
+		pinned: false,
+	},
 };
 
 /** Valid app IDs as a Set for quick filtering of persisted-but-unknown apps. */
@@ -327,6 +437,7 @@ const defaultDesktopIcons: DesktopIcon[] = [
 	{ name: 'Projects', icon: '📂', appId: 'file-explorer', path: 'C:/Users/User/Desktop/Project Files', gridX: 0, gridY: 3 },
 	{ name: 'Notes.txt', icon: '📄', path: 'C:/Users/User/Desktop/Notes.txt', gridX: 0, gridY: 4 },
 	{ name: 'Screenshots', icon: '📁', path: 'C:/Users/User/Desktop/Screenshots', gridX: 0, gridY: 5 },
+	{ name: 'Budget.xlsx', icon: '📊', path: 'C:/Users/User/Desktop/Budget.xlsx', gridX: 0, gridY: 6 },
 ];
 
 export interface SnapPreview {
@@ -370,6 +481,8 @@ class WindowManager {
 	taskViewOpen = $state(false);
 	/** Last position/size used by each app, restored on reopen. */
 	lastWindowStates = $state<Partial<Record<AppID, PersistedWindowState>>>({});
+	/** Per-app launch arguments, set by openApp(id, args). Apps read these on mount. */
+	appLaunchArgs = $state<Partial<Record<AppID, any>>>({});
 
 	constructor() {
 		this.hydrateFromStorage();
@@ -418,7 +531,10 @@ class WindowManager {
 		}
 	}
 
-	openApp(id: AppID) {
+	openApp(id: AppID, args?: any) {
+		if (args !== undefined) {
+			this.appLaunchArgs[id] = args;
+		}
 		if (this.openApps.includes(id)) {
 			if (this.windowStates[id]?.minimized) {
 				this.windowStates[id].minimized = false;

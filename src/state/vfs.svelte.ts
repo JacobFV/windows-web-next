@@ -158,6 +158,18 @@ function createDefaultFS(): Map<string, FSNode> {
 
 				['Documents', dir('Documents', new Map([
 					['Meeting Notes.docx', file('Meeting Notes.docx', '', 250880, new Date(2025, 0, 28, 16, 22))],
+					['Resume.docx', file(
+						'Resume.docx',
+						'<h1>John Doe</h1><p>Software Engineer</p><h2>Experience</h2><p>Acme Corp 2020&ndash;Present</p>',
+						undefined,
+						new Date(2025, 0, 20, 9, 0),
+					)],
+					['Quarterly Review.pptx', file(
+						'Quarterly Review.pptx',
+						'{"slides":[{"id":1,"layout":"title","elements":[{"id":1,"type":"text","x":100,"y":200,"w":760,"h":80,"content":"Q4 Review","style":{"fontSize":48,"fontWeight":"bold"}}]}, {"id":2,"layout":"content","elements":[{"id":1,"type":"text","x":80,"y":80,"w":820,"h":50,"content":"Highlights","style":{"fontSize":32,"fontWeight":"bold"}}]}]}',
+						undefined,
+						new Date(2025, 1, 1, 14, 0),
+					)],
 					['Budget 2025.xlsx', file('Budget 2025.xlsx', '', 159744, new Date(2025, 1, 2, 11, 30))],
 					['Report.pdf', file('Report.pdf', '', 2411724, new Date(2025, 0, 30, 13, 45))],
 					['readme.txt', file(
@@ -204,6 +216,35 @@ function createDefaultFS(): Map<string, FSNode> {
 				['Videos', dir('Videos', new Map([
 					['tutorial.mp4', file('tutorial.mp4', '', 157286400, new Date(2024, 11, 20, 16, 0))],
 				]), new Date(2024, 11, 20, 16, 0))],
+
+				['Code', dir('Code', new Map([
+					['index.ts', file(
+						'index.ts',
+						`import { createApp } from './app';\nimport type { Config } from './types';\n\nconst config: Config = {\n\tname: 'my-app',\n\tversion: '1.0.0',\n\tdebug: false,\n};\n\nconst app = createApp(config);\napp.start().then(() => {\n\tconsole.log('App started');\n}).catch((err) => {\n\tconsole.error('Failed to start app:', err);\n\tprocess.exit(1);\n});\n`,
+						undefined,
+						new Date(2025, 2, 12, 14, 30),
+					)],
+					['package.json', file(
+						'package.json',
+						`{\n\t"name": "my-app",\n\t"version": "1.0.0",\n\t"description": "A small example project",\n\t"type": "module",\n\t"scripts": {\n\t\t"dev": "vite",\n\t\t"build": "vite build",\n\t\t"test": "vitest"\n\t},\n\t"dependencies": {\n\t\t"svelte": "^5.0.0"\n\t},\n\t"devDependencies": {\n\t\t"typescript": "^5.6.0",\n\t\t"vite": "^5.4.0"\n\t}\n}\n`,
+						undefined,
+						new Date(2025, 2, 12, 14, 25),
+					)],
+					['README.md', file(
+						'README.md',
+						`# My App\n\nA small example project that demonstrates the basics.\n\n## Getting Started\n\nInstall dependencies and run the dev server:\n\n\`\`\`sh\npnpm install\npnpm dev\n\`\`\`\n\n## Scripts\n\n- \`dev\` — start the local dev server\n- \`build\` — produce a production build\n- \`test\` — run the test suite\n\n## License\n\nMIT\n`,
+						undefined,
+						new Date(2025, 2, 12, 14, 0),
+					)],
+					['src', dir('src', new Map([
+						['main.rs', file(
+							'main.rs',
+							`use std::io::{self, Write};\n\nfn main() {\n\tprintln!("Hello, world!");\n\n\tprint!("What is your name? ");\n\tio::stdout().flush().unwrap();\n\n\tlet mut name = String::new();\n\tio::stdin().read_line(&mut name).expect("Failed to read input");\n\tlet name = name.trim();\n\n\tif name.is_empty() {\n\t\tprintln!("No name provided.");\n\t} else {\n\t\tprintln!("Nice to meet you, {}!", name);\n\t}\n}\n`,
+							undefined,
+							new Date(2025, 2, 12, 14, 28),
+						)],
+					]), new Date(2025, 2, 12, 14, 28))],
+				]), new Date(2025, 2, 12, 14, 30))],
 
 				// Files from Terminal defaults placed directly in User home
 				['config.json', file(

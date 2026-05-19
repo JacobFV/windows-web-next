@@ -23,7 +23,17 @@
 	import Store from './components/apps/Store.svelte';
 	import SnippingTool from './components/apps/SnippingTool.svelte';
 	import WordPad from './components/apps/WordPad.svelte';
+	import Word from './components/apps/Word.svelte';
+	import PowerPoint from './components/apps/PowerPoint.svelte';
 	import DiskCleanup from './components/apps/DiskCleanup.svelte';
+	import VSCode from './components/apps/VSCode.svelte';
+	import DevUtils from './components/apps/DevUtils.svelte';
+	import Excel from './components/apps/Excel.svelte';
+	import StickyNotes from './components/apps/StickyNotes.svelte';
+	import ToDo from './components/apps/ToDo.svelte';
+	import People from './components/apps/People.svelte';
+	import News from './components/apps/News.svelte';
+	import Camera from './components/apps/Camera.svelte';
 	import RunDialog from './components/RunDialog.svelte';
 	import AltTabSwitcher from './components/AltTabSwitcher.svelte';
 	import LockScreen from './components/LockScreen.svelte';
@@ -237,7 +247,7 @@
 		};
 	});
 
-	const appComponents: Record<AppID, any> = {
+	const appComponents: Partial<Record<AppID, any>> = {
 		'file-explorer': FileExplorer,
 		edge: Edge,
 		settings: Settings,
@@ -257,7 +267,17 @@
 		store: Store,
 		'snipping-tool': SnippingTool,
 		wordpad: WordPad,
+		word: Word,
+		powerpoint: PowerPoint,
 		'disk-cleanup': DiskCleanup,
+		excel: Excel,
+		vscode: VSCode,
+		'dev-utils': DevUtils,
+		'sticky-notes': StickyNotes,
+		todo: ToDo,
+		people: People,
+		news: News,
+		camera: Camera,
 	};
 
 	// Rubber band selection state

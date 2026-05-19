@@ -31,7 +31,7 @@ export function openFile(path: string): boolean {
 
 	const content = readFile(path);
 	pending_store.value = { path, content: content ?? undefined };
-	wm.openApp(appId);
+	wm.openApp(appId, { path });
 	return true;
 }
 
