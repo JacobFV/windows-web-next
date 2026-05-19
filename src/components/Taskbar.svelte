@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
 	import { unreadCount } from '../state/notifications.svelte.ts';
+	import { taskbarControl } from '../state/taskbar-control.svelte.ts';
 	import NotificationCenter from './NotificationCenter.svelte';
 	import ToastContainer from './ToastContainer.svelte';
 	import { onMount } from 'svelte';
@@ -95,6 +96,38 @@
 		updateTime();
 		const interval = setInterval(updateTime, 1000);
 		return () => clearInterval(interval);
+	});
+
+	// React to external requests to open the taskbar search (Win+S / Win+Q).
+	let lastOpenSearchSeen = 0;
+	$effect(() => {
+		const v = taskbarControl.openSearchRequest;
+		if (v !== lastOpenSearchSeen) {
+			lastOpenSearchSeen = v;
+			if (v > 0) {
+				closeAllFlyouts();
+				wm.closeStartMenu();
+				searchOpen = true;
+				setTimeout(() => { searchInputEl?.focus(); }, 50);
+			}
+		}
+	});
+
+	// React to Win+T: cycle focus through pinned/open taskbar app buttons.
+	let cycleIndex = 0;
+	let lastCycleSeen = 0;
+	$effect(() => {
+		const v = taskbarControl.cycleAppsRequest;
+		if (v !== lastCycleSeen) {
+			lastCycleSeen = v;
+			if (v > 0) {
+				const buttons = document.querySelectorAll<HTMLButtonElement>('.taskbar .taskbar-btn.app-btn');
+				if (buttons.length > 0) {
+					cycleIndex = (cycleIndex + 1) % buttons.length;
+					buttons[cycleIndex]?.focus();
+				}
+			}
+		}
 	});
 
 	function handleAppClick(id: AppID) {

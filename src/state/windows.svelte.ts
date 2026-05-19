@@ -311,6 +311,11 @@ class WindowManager {
 	desktopIcons = $state<DesktopIcon[]>([...defaultDesktopIcons]);
 	selectedDesktopIcon = $state<number | null>(null);
 	snapPreview = $state<SnapPreview | null>(null);
+	runDialogOpen = $state(false);
+	locked = $state(false);
+	altTabOpen = $state(false);
+	altTabIndex = $state(0);
+	taskViewOpen = $state(false);
 
 	openApp(id: AppID) {
 		if (this.openApps.includes(id)) {

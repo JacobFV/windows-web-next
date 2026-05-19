@@ -24,8 +24,14 @@
 	import SnippingTool from './components/apps/SnippingTool.svelte';
 	import WordPad from './components/apps/WordPad.svelte';
 	import DiskCleanup from './components/apps/DiskCleanup.svelte';
+	import RunDialog from './components/RunDialog.svelte';
+	import AltTabSwitcher from './components/AltTabSwitcher.svelte';
+	import LockScreen from './components/LockScreen.svelte';
+	import TaskView from './components/TaskView.svelte';
 	import { wm, appConfigs, type AppID } from './state/windows.svelte.ts';
 	import { preferences, applyPreferences } from './state/preferences.svelte';
+	import { requestOpenSearch, requestCycleApps } from './state/taskbar-control.svelte.ts';
+	import { snapActive } from './state/window-snap';
 
 	// Apply preferences on initial mount and whenever they change
 	$effect(() => {
@@ -35,6 +41,196 @@
 		void preferences.transparency;
 		void preferences.animations;
 		applyPreferences();
+	});
+
+	// Global Windows keyboard shortcuts
+	$effect(() => {
+		function isTextInputFocused(): boolean {
+			const tag = document.activeElement?.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+			const ae = document.activeElement as HTMLElement | null;
+			if (ae?.isContentEditable) return true;
+			return false;
+		}
+
+		function openAltTab(forward: boolean) {
+			const apps = wm.openApps;
+			if (apps.length === 0) return;
+			if (!wm.altTabOpen) {
+				wm.altTabOpen = true;
+				const current = wm.activeApp ? apps.indexOf(wm.activeApp) : -1;
+				// Start at next/prev relative to current active
+				const start = current >= 0 ? current : 0;
+				wm.altTabIndex = (start + (forward ? 1 : -1) + apps.length) % apps.length;
+			} else {
+				wm.altTabIndex = (wm.altTabIndex + (forward ? 1 : -1) + apps.length) % apps.length;
+			}
+		}
+
+		function commitAltTab() {
+			const apps = wm.openApps;
+			const id = apps[wm.altTabIndex];
+			wm.altTabOpen = false;
+			if (id) {
+				const ws = wm.windowStates[id];
+				if (ws?.minimized) {
+					ws.minimized = false;
+					ws.restoring = true;
+					setTimeout(() => {
+						if (wm.windowStates[id]) wm.windowStates[id].restoring = false;
+					}, 200);
+				}
+				wm.focusApp(id);
+			}
+		}
+
+		function onKeyDown(e: KeyboardEvent) {
+			// Lock screen owns input — bail (LockScreen has a capture-phase handler).
+			if (wm.locked) return;
+
+			const inText = isTextInputFocused();
+
+			// Alt+Tab — works even while input is focused
+			if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'Tab') {
+				e.preventDefault();
+				openAltTab(!e.shiftKey);
+				return;
+			}
+
+			// Alt+F4 — close the active window
+			if (e.altKey && (e.key === 'F4' || e.code === 'F4')) {
+				e.preventDefault();
+				if (wm.activeApp) wm.closeApp(wm.activeApp);
+				return;
+			}
+
+			// Meta/Win combos
+			if (e.metaKey && !e.ctrlKey && !e.altKey) {
+				const key = e.key;
+
+				// Win+L — always (even from input)
+				if (key === 'l' || key === 'L') {
+					e.preventDefault();
+					wm.locked = true;
+					return;
+				}
+
+				// Win+D — always (even from input): toggle show desktop / restore
+				if (key === 'd' || key === 'D') {
+					e.preventDefault();
+					const anyVisible = wm.openApps.some((id) => !wm.windowStates[id]?.minimized);
+					if (anyVisible) {
+						wm.minimizeAll();
+					} else {
+						// Restore all minimized windows
+						for (const id of wm.openApps) {
+							const ws = wm.windowStates[id];
+							if (ws?.minimized) {
+								ws.minimized = false;
+								ws.restoring = true;
+								setTimeout(() => {
+									if (wm.windowStates[id]) wm.windowStates[id].restoring = false;
+								}, 200);
+							}
+						}
+						const last = wm.openApps[wm.openApps.length - 1];
+						if (last) wm.focusApp(last);
+					}
+					return;
+				}
+
+				// All remaining Win+letter shortcuts: skip when typing in a text field
+				if (inText) return;
+
+				// Win+R — toggle Run dialog
+				if (key === 'r' || key === 'R') {
+					e.preventDefault();
+					wm.runDialogOpen = !wm.runDialogOpen;
+					return;
+				}
+
+				// Win+E — File Explorer
+				if (key === 'e' || key === 'E') {
+					e.preventDefault();
+					wm.openApp('file-explorer');
+					return;
+				}
+
+				// Win+I — Settings
+				if (key === 'i' || key === 'I') {
+					e.preventDefault();
+					wm.openApp('settings');
+					return;
+				}
+
+				// Win+S or Win+Q — Search
+				if (key === 's' || key === 'S' || key === 'q' || key === 'Q') {
+					e.preventDefault();
+					requestOpenSearch();
+					return;
+				}
+
+				// Win+T — cycle taskbar app buttons
+				if (key === 't' || key === 'T') {
+					e.preventDefault();
+					requestCycleApps();
+					return;
+				}
+
+				// Win+Tab — Task View toggle
+				if (key === 'Tab') {
+					e.preventDefault();
+					wm.taskViewOpen = !wm.taskViewOpen;
+					return;
+				}
+
+				// Win+Arrow — snap active window
+				if (key === 'ArrowLeft') {
+					e.preventDefault();
+					snapActive('left');
+					return;
+				}
+				if (key === 'ArrowRight') {
+					e.preventDefault();
+					snapActive('right');
+					return;
+				}
+				if (key === 'ArrowUp') {
+					e.preventDefault();
+					if (wm.activeApp) {
+						const ws = wm.windowStates[wm.activeApp];
+						if (ws && !ws.maximized) wm.toggleMaximize(wm.activeApp);
+					}
+					return;
+				}
+				if (key === 'ArrowDown') {
+					e.preventDefault();
+					if (wm.activeApp) {
+						const ws = wm.windowStates[wm.activeApp];
+						if (ws?.maximized) {
+							wm.toggleMaximize(wm.activeApp);
+						} else {
+							wm.minimizeApp(wm.activeApp);
+						}
+					}
+					return;
+				}
+			}
+		}
+
+		function onKeyUp(e: KeyboardEvent) {
+			// When Alt is released while Alt+Tab is open, commit selection
+			if (wm.altTabOpen && (e.key === 'Alt' || !e.altKey)) {
+				commitAltTab();
+			}
+		}
+
+		window.addEventListener('keydown', onKeyDown);
+		window.addEventListener('keyup', onKeyUp);
+		return () => {
+			window.removeEventListener('keydown', onKeyDown);
+			window.removeEventListener('keyup', onKeyUp);
+		};
 	});
 
 	const appComponents: Record<AppID, any> = {
@@ -220,6 +416,22 @@
 	{/if}
 
 	<Taskbar />
+
+	{#if wm.runDialogOpen}
+		<RunDialog />
+	{/if}
+
+	{#if wm.altTabOpen}
+		<AltTabSwitcher />
+	{/if}
+
+	{#if wm.taskViewOpen}
+		<TaskView />
+	{/if}
+
+	{#if wm.locked}
+		<LockScreen />
+	{/if}
 </div>
 
 <style>
