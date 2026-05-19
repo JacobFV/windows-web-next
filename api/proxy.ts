@@ -209,9 +209,17 @@ function absolutize(maybeRelative: string, base: string): string | null {
 
 function rewriteHtmlAttributes(html: string, base: string, sessionId: string): string {
 	// WHY this exact attribute list: these are every standard attribute that
-	// can issue a network request. `formaction` and `data-src` are added
-	// because they're common in modern SPAs (React lazy images, htmx forms).
-	const attrs = ['src', 'href', 'action', 'formaction', 'data-src', 'poster', 'background'];
+	// can issue a network request, PLUS the most common data-* URL stashes used
+	// by modern frameworks (and GitHub specifically — github.com uses data-href
+	// to JS-swap its theme stylesheets, and if we don't proxify those the
+	// browser tries to load them cross-origin from githubassets.com and fails
+	// silently, producing an unstyled page).
+	// `formaction` — htmx and form-override patterns.
+	// `data-src`, `data-href`, `data-url`, `data-bg-src` — lazy-load / theme-swap.
+	// `data-base-href` — GitHub's pjax-style base anchor for swapped sheets.
+	// `xlink:href` — SVG <use> references (also rewritten further down because
+	//   the colon breaks the simple-attr regex).
+	const attrs = ['src', 'href', 'action', 'formaction', 'data-src', 'data-href', 'data-url', 'data-bg-src', 'data-base-href', 'poster', 'background'];
 
 	let out = html;
 	for (const attr of attrs) {
@@ -235,8 +243,21 @@ function rewriteHtmlAttributes(html: string, base: string, sessionId: string): s
 		);
 	}
 
+	// WHY xlink:href separately: the regex above keys on `\s${attr}` and the
+	// colon in `xlink:href` breaks the pattern when fed through `new RegExp`.
+	// Hand-write the two SVG variants here. SVG <use href|xlink:href="..."> is
+	// the canonical way to reference sprite assets — common in icon libraries.
+	out = out.replace(/\sxlink:href\s*=\s*"([^"]*)"/gi, (_m, val: string) => {
+		const abs = absolutize(val, base);
+		return ` xlink:href="${abs ? proxify(abs, sessionId) : val}"`;
+	});
+	out = out.replace(/\sxlink:href\s*=\s*'([^']*)'/gi, (_m, val: string) => {
+		const abs = absolutize(val, base);
+		return ` xlink:href='${abs ? proxify(abs, sessionId) : val}'`;
+	});
+
 	// srcset is comma-separated `url descriptor` pairs
-	out = out.replace(/\s(srcset|imagesrcset)\s*=\s*"([^"]*)"/gi, (_m, attr: string, val: string) => {
+	out = out.replace(/\s(srcset|imagesrcset|data-srcset)\s*=\s*"([^"]*)"/gi, (_m, attr: string, val: string) => {
 		const rewritten = val
 			.split(',')
 			.map((part) => {
@@ -285,11 +306,21 @@ function rewriteHtmlAttributes(html: string, base: string, sessionId: string): s
 }
 
 function rewriteCssUrls(css: string, base: string, sessionId: string): string {
-	return css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (_m, quote: string, url: string) => {
+	let out = css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (_m, quote: string, url: string) => {
 		const abs = absolutize(url, base);
 		if (!abs) return `url(${quote}${url}${quote})`;
 		return `url(${quote}${proxify(abs, sessionId)}${quote})`;
 	});
+	// WHY @import handled separately: it can take either url("...") OR a bare
+	// quoted string ("foo.css" without url(...)). The url() branch above only
+	// catches the first form. The bare-string form is common in CSS reset
+	// libraries and font kits.
+	out = out.replace(/@import\s+(['"])([^'"]+)\1/gi, (_m, quote: string, url: string) => {
+		const abs = absolutize(url, base);
+		if (!abs) return `@import ${quote}${url}${quote}`;
+		return `@import ${quote}${proxify(abs, sessionId)}${quote}`;
+	});
+	return out;
 }
 
 // -----------------------------------------------------------------------------
