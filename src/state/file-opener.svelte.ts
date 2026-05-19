@@ -31,6 +31,10 @@ export function openFile(path: string): boolean {
 
 	const content = readFile(path);
 	pending_store.value = { path, content: content ?? undefined };
+	// Per-app launch args: apps that read structured files (PowerPoint .pptx) can pick this up.
+	if (appId === 'powerpoint') {
+		wm.appLaunchArgs = { ...wm.appLaunchArgs, powerpoint: { path } };
+	}
 	wm.openApp(appId);
 	return true;
 }

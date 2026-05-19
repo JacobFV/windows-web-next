@@ -20,7 +20,8 @@ export type AppID =
 	| 'store'
 	| 'snipping-tool'
 	| 'wordpad'
-	| 'disk-cleanup';
+	| 'disk-cleanup'
+	| 'powerpoint';
 
 export interface WindowState {
 	x: number;
@@ -258,6 +259,16 @@ export const appConfigs: Record<AppID, AppConfig> = {
 		minHeight: 400,
 		pinned: false,
 	},
+	powerpoint: {
+		id: 'powerpoint',
+		title: 'PowerPoint',
+		icon: '📊',
+		defaultWidth: 1100,
+		defaultHeight: 720,
+		minWidth: 700,
+		minHeight: 500,
+		pinned: false,
+	},
 };
 
 function createInitialWindowState(config: AppConfig, index: number): WindowState {
@@ -311,6 +322,8 @@ class WindowManager {
 	desktopIcons = $state<DesktopIcon[]>([...defaultDesktopIcons]);
 	selectedDesktopIcon = $state<number | null>(null);
 	snapPreview = $state<SnapPreview | null>(null);
+	/** Per-app launch arguments (e.g. file path to open). Consumed on mount. */
+	appLaunchArgs = $state<Partial<Record<AppID, Record<string, unknown>>>>({});
 
 	openApp(id: AppID) {
 		if (this.openApps.includes(id)) {

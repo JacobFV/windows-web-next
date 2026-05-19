@@ -24,6 +24,7 @@
 	import SnippingTool from './components/apps/SnippingTool.svelte';
 	import WordPad from './components/apps/WordPad.svelte';
 	import DiskCleanup from './components/apps/DiskCleanup.svelte';
+	import PowerPoint from './components/apps/PowerPoint.svelte';
 	import { wm, appConfigs, type AppID } from './state/windows.svelte.ts';
 	import { preferences, applyPreferences } from './state/preferences.svelte';
 
@@ -58,6 +59,7 @@
 		'snipping-tool': SnippingTool,
 		wordpad: WordPad,
 		'disk-cleanup': DiskCleanup,
+		powerpoint: PowerPoint,
 	};
 
 	// Rubber band selection state

@@ -42,7 +42,7 @@ const registry: Record<string, FileTypeInfo> = {
 	'.pdf': { appId: 'edge', typeLabel: 'PDF Document', icon: '📕' },
 	'.docx': { appId: 'edge', typeLabel: 'Microsoft Word', icon: '📝' },
 	'.xlsx': { appId: 'edge', typeLabel: 'Microsoft Excel', icon: '📊' },
-	'.pptx': { appId: 'edge', typeLabel: 'Microsoft PowerPoint', icon: '📊' },
+	'.pptx': { appId: 'powerpoint', typeLabel: 'Microsoft PowerPoint', icon: '📊' },
 
 	// Archives
 	'.zip': { appId: null, typeLabel: 'Compressed Folder', icon: '📦' },

@@ -159,6 +159,7 @@ function createDefaultFS(): Map<string, FSNode> {
 				['Documents', dir('Documents', new Map([
 					['Meeting Notes.docx', file('Meeting Notes.docx', '', 250880, new Date(2025, 0, 28, 16, 22))],
 					['Budget 2025.xlsx', file('Budget 2025.xlsx', '', 159744, new Date(2025, 1, 2, 11, 30))],
+					['Quarterly Review.pptx', file('Quarterly Review.pptx', '', 0, new Date(2025, 1, 4, 9, 0))],
 					['Report.pdf', file('Report.pdf', '', 2411724, new Date(2025, 0, 30, 13, 45))],
 					['readme.txt', file(
 						'readme.txt',
