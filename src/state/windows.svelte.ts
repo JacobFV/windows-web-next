@@ -20,7 +20,8 @@ export type AppID =
 	| 'store'
 	| 'snipping-tool'
 	| 'wordpad'
-	| 'disk-cleanup';
+	| 'disk-cleanup'
+	| 'excel';
 
 export interface WindowState {
 	x: number;
@@ -256,6 +257,16 @@ export const appConfigs: Record<AppID, AppConfig> = {
 		defaultHeight: 550,
 		minWidth: 400,
 		minHeight: 400,
+		pinned: false,
+	},
+	excel: {
+		id: 'excel',
+		title: 'Excel',
+		icon: '📊',
+		defaultWidth: 1100,
+		defaultHeight: 720,
+		minWidth: 700,
+		minHeight: 480,
 		pinned: false,
 	},
 };

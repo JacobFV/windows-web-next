@@ -41,7 +41,7 @@ const registry: Record<string, FileTypeInfo> = {
 	// Documents → Edge (as viewer)
 	'.pdf': { appId: 'edge', typeLabel: 'PDF Document', icon: '📕' },
 	'.docx': { appId: 'edge', typeLabel: 'Microsoft Word', icon: '📝' },
-	'.xlsx': { appId: 'edge', typeLabel: 'Microsoft Excel', icon: '📊' },
+	'.xlsx': { appId: 'excel', typeLabel: 'Microsoft Excel', icon: '📊' },
 	'.pptx': { appId: 'edge', typeLabel: 'Microsoft PowerPoint', icon: '📊' },
 
 	// Archives
