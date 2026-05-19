@@ -1,12 +1,15 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { wm, appConfigs, type AppID } from '../state/windows.svelte.ts';
+	// Apps register a custom title-bar snippet here (e.g. Terminal renders its tabs in the title bar).
+	import { customTitleBars } from '../state/titlebars.svelte.ts';
 
 	let { appId, children }: { appId: AppID; children: Snippet } = $props();
 
 	let config = $derived(appConfigs[appId]);
 	let ws = $derived(wm.windowStates[appId]);
 	let isActive = $derived(wm.activeApp === appId);
+	let customTitleBar = $derived(customTitleBars.get(appId));
 
 	let dragging = $state(false);
 	let dragOffsetX = $state(0);
@@ -52,9 +55,9 @@
 	}
 
 	function handleMouseDown(e: MouseEvent) {
-		// Only drag on the title bar itself, not on buttons
+		// Only drag on the title bar itself, not on buttons or opted-out children (tabs, +, etc.)
 		const target = e.target as HTMLElement;
-		if (target.closest('.window-controls')) return;
+		if (target.closest('.window-controls') || target.closest('[data-no-drag]')) return;
 
 		wm.focusApp(appId);
 
@@ -309,13 +312,20 @@
 	<div
 		class="title-bar"
 		class:active={isActive}
+		class:custom={customTitleBar}
 		onmousedown={handleMouseDown}
 		ondblclick={handleDoubleClick}
 	>
-		<div class="title-bar-left">
-			<span class="window-icon">{config.icon}</span>
-			<span class="window-title">{config.title}</span>
-		</div>
+		{#if customTitleBar}
+			<div class="title-bar-custom">
+				{@render customTitleBar()}
+			</div>
+		{:else}
+			<div class="title-bar-left">
+				<span class="window-icon">{config.icon}</span>
+				<span class="window-title">{config.title}</span>
+			</div>
+		{/if}
 
 		<div class="window-controls">
 			<button class="control-btn minimize-btn" onclick={handleMinimize} title="Minimize">
@@ -450,7 +460,7 @@
 
 	.title-bar {
 		display: flex;
-		align-items: center;
+		align-items: stretch;
 		justify-content: space-between;
 		height: 32px;
 		min-height: 32px;
@@ -461,11 +471,19 @@
 		cursor: default;
 		border-bottom: 1px solid rgba(0, 0, 0, 0.04);
 		border-radius: var(--win-radius-md) var(--win-radius-md) 0 0;
-		overflow: hidden;
 	}
 
-	.title-bar:not(.active) {
+	.title-bar:not(.active):not(.custom) {
 		background: rgba(243, 243, 243, 0.7);
+	}
+
+	/* Apps providing a custom title bar (Terminal) own the look — no padding, no bg blur. */
+	.title-bar.custom {
+		padding-left: 0;
+		background: transparent;
+		backdrop-filter: none;
+		-webkit-backdrop-filter: none;
+		border-bottom: none;
 	}
 
 	.title-bar-left {
@@ -473,6 +491,14 @@
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
+	}
+
+	.title-bar-custom {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: stretch;
+		overflow: hidden;
 	}
 
 	.window-icon {
