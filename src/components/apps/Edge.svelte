@@ -563,7 +563,7 @@
 	const quickLinks = [
 		{ label: 'Microsoft', icon: '🟦', color: '#0078D4' },
 		{ label: 'Outlook', icon: '📧', color: '#0072C6' },
-		{ label: 'GitHub', icon: '🐱', color: '#24292e' },
+		{ label: 'GitHub', icon: '', image: '/windows-logo.svg', color: '#0078D4' },
 		{ label: 'YouTube', icon: '▶️', color: '#FF0000' },
 		{ label: 'Wikipedia', icon: '📚', color: '#333' },
 		{ label: 'Reddit', icon: '🟠', color: '#FF4500' },
@@ -954,7 +954,11 @@
 					{#each quickLinks as link (link.label)}
 						<button class="quick-link" onclick={() => handleQuickLink(link.label)}>
 							<div class="quick-link-icon" style:background={link.color}>
-								<span>{link.icon}</span>
+								{#if link.image}
+									<img src={link.image} alt="" />
+								{:else}
+									<span>{link.icon}</span>
+								{/if}
 							</div>
 							<span class="quick-link-label">{link.label}</span>
 						</button>
@@ -1598,6 +1602,12 @@
 		align-items: center;
 		justify-content: center;
 		font-size: 18px;
+	}
+
+	.quick-link-icon img {
+		width: 24px;
+		height: 24px;
+		display: block;
 	}
 
 	.quick-link-label {
