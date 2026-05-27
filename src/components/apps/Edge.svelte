@@ -424,7 +424,26 @@
 		tabs = tabs;
 	}
 
+	function rewriteGithub(target: string): string {
+		const net = (window as any).__synthuxInternet;
+		if (!net || !net.enabled || !net.url) return target;
+		try {
+			const u = new URL(target);
+			if (!u.hostname.endsWith('github.com')) return target;
+			const parts = u.pathname.split('/').filter(Boolean);
+			const owner = parts[0] || 'acme';
+			const repo = parts[1] || 'api';
+			let view = 'overview';
+			if (parts[2] === 'pulls') view = 'pulls';
+			else if (parts[2] === 'pull' && parts[3]) {
+				return `${net.url}/web/github/${owner}/${repo}/pull/${parts[3]}`;
+			} else if (parts[2]) view = parts[2];
+			return `${net.url}/web/github/${owner}/${repo}?view=${encodeURIComponent(view)}`;
+		} catch { return target; }
+	}
+
 	function navigateProxy(tab: Tab, target: string) {
+		target = rewriteGithub(target);
 		tab.proxyTarget = target;
 		ensureSessionStream(tab);
 		simulateLoading(() => {
