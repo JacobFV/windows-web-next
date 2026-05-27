@@ -545,6 +545,114 @@
 			return;
 		}
 
+		// --- developer commands: git / pytest / npm / pnpm / make ---
+		const tokens = rawCmd.trim().split(/\s+/);
+		const head = tokens[0];
+		const sub = tokens[1] || '';
+		const rest = tokens.slice(1).join(' ');
+		if (head === 'git') {
+			const out: string[] = [];
+			if (!sub || sub === '--version') out.push('git version 2.43.0.windows.1');
+			else if (sub === 'add') out.push('');
+			else if (sub === 'commit') {
+				const mIdx = tokens.indexOf('-m');
+				const amIdx = tokens.indexOf('-am');
+				const msg = (mIdx >= 0 ? tokens.slice(mIdx + 1) : amIdx >= 0 ? tokens.slice(amIdx + 1) : []).join(' ').replace(/^['"]|['"]$/g, '') || 'commit';
+				const sha = Math.random().toString(16).slice(2, 9);
+				out.push(`[main ${sha}] ${msg}`, ` 1 file changed, 1 insertion(+)`);
+			} else if (sub === 'push') {
+				const remote = tokens[2] || 'origin';
+				const branch = tokens[3] || 'main';
+				out.push('Enumerating objects: 5, done.',
+					'Counting objects: 100% (5/5), done.',
+					'Writing objects: 100% (3/3), 412 bytes | 412.00 KiB/s, done.',
+					'Total 3 (delta 2), reused 0 (delta 0), pack-reused 0',
+					'To github.com:acme/api.git',
+					`   a1b2c3d..e4f5g6h  ${branch} -> ${branch}`);
+			} else if (sub === 'pull') {
+				out.push('Already up to date.');
+			} else if (sub === 'fetch') {
+				out.push('From github.com:acme/api', ' * [new branch]      main       -> origin/main');
+			} else if (sub === 'checkout') {
+				const tgt = tokens.slice(2).find((t: string) => !t.startsWith('-')) || 'main';
+				out.push(`Switched to branch '${tgt}'`);
+			} else if (sub === 'status') {
+				out.push('On branch main', "Your branch is up to date with 'origin/main'.", '', 'nothing to commit, working tree clean');
+			} else if (sub === 'log') {
+				out.push('commit a1b2c3d4e5f6 (HEAD -> main, origin/main)',
+					'Author: User <user@example.com>',
+					'Date:   ' + new Date().toString(),
+					'',
+					'    Latest commit');
+			} else if (sub === 'clone') {
+				const repo = tokens[2] || 'repo';
+				const name = repo.split('/').pop()?.replace(/\.git$/, '') || 'repo';
+				out.push(`Cloning into '${name}'...`, 'remote: Enumerating objects: 142, done.', "Receiving objects: 100% (142/142), done.", 'Resolving deltas: 100% (75/75), done.');
+			} else if (sub === 'branch') {
+				out.push('* main', '  develop', '  feature/new-ui');
+			} else if (sub === 'remote') {
+				out.push('origin\thttps://github.com/user/repo.git (fetch)', 'origin\thttps://github.com/user/repo.git (push)');
+			} else if (sub === 'diff') {
+				/* clean */
+			} else if (sub === 'init') {
+				out.push('Initialized empty Git repository in C:\\repo\\.git\\');
+			} else out.push(`git: '${sub}' is not a git command. See 'git --help'.`);
+			tab.history = [...tab.history, ...out, ''];
+			return;
+		}
+		if (head === 'pytest') {
+			const filter = (() => {
+				const i = tokens.indexOf('-k'); return i >= 0 ? tokens[i + 1] || '' : '';
+			})();
+			const ran = 4 + Math.floor(Math.random() * 6);
+			const passed = ran - Math.floor(Math.random() * 2);
+			const failed = ran - passed;
+			const elapsed = (Math.random() * 2 + 0.4).toFixed(2);
+			const out = [
+				'============================= test session starts ==============================',
+				'platform win32 -- Python 3.12.1, pytest-7.4.4, pluggy-1.3.0',
+				'rootdir: C:\\repo',
+			];
+			if (filter) out.push(`pytest -k ${filter}`);
+			out.push(`collected ${ran} items`, '');
+			for (let i = 0; i < ran; i++) out.push(`tests\\test_unit.py ${i < passed ? '.' : 'F'}`);
+			out.push('');
+			out.push(failed === 0
+				? `============================== ${ran} passed in ${elapsed}s ==============================`
+				: `========================= ${failed} failed, ${passed} passed in ${elapsed}s =========================`);
+			tab.history = [...tab.history, ...out, ''];
+			return;
+		}
+		if (head === 'npm' || head === 'pnpm' || head === 'yarn') {
+			const out: string[] = [];
+			if (sub === '--version' || sub === '-v') {
+				out.push(head === 'npm' ? '10.2.5' : head === 'pnpm' ? '8.15.1' : '1.22.21');
+			} else if (sub === 'install' || sub === 'i') {
+				out.push('added 142 packages, and audited 143 packages in 1s', '', '28 packages are looking for funding', 'found 0 vulnerabilities');
+			} else if (sub === 'run') {
+				const script = tokens[2] || 'start';
+				out.push(`> ${script}`, `> echo "running ${script}"`, '', `running ${script}`);
+			} else if (sub === 'test') {
+				out.push('PASS  tests/example.spec.ts', 'Tests: 8 passed, 8 total', 'Time:   1.42s');
+			} else if (sub === 'build') {
+				out.push('> build', '✓ 42 modules transformed.', 'dist/index.html  0.62 kB', '✓ built in 1.42s');
+			} else {
+				out.push(`Usage: ${head} <command>`);
+			}
+			tab.history = [...tab.history, ...out, ''];
+			return;
+		}
+		if (head === 'make') {
+			const target = sub || 'all';
+			tab.history = [...tab.history,
+				"make[1]: Entering directory 'C:\\repo'",
+				'gcc -Wall -O2 -c main.c -o main.o',
+				`gcc -Wall -O2 main.o -o ${target}`,
+				"make[1]: Leaving directory 'C:\\repo'",
+				''];
+			return;
+		}
+
 		// --- unrecognized or empty ---
 		if (cmd !== '') {
 			tab.history = [...tab.history,
