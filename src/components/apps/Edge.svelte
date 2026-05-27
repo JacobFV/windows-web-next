@@ -76,6 +76,10 @@
 	}
 
 	function buildProxyUrl(target: string, sessionId: string): string {
+		// SynthUX virtual-internet pages serve HTML directly with framing
+		// permissions; bypass the proxy entirely.
+		const net = (window as any).__synthuxInternet;
+		if (net && net.url && target.startsWith(net.url)) return target;
 		// Path-based form (MUST match api/proxy.ts proxify()). Webpack-bundled
 		// sites compute publicPath from document.currentScript.src; a query-
 		// based /api/proxy?url=… URL makes webpack pick /api/ as publicPath
