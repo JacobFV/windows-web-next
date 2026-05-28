@@ -31,7 +31,8 @@ export type AppID =
 	| 'people'
 	| 'news'
 	| 'camera'
-	| 'teams';
+	| 'teams'
+	| 'slack';
 
 export interface AppConfig {
 	id: AppID;
@@ -76,6 +77,7 @@ export const appConfigs: Record<AppID, AppConfig> = {
 	news: { id: 'news', title: 'News', icon: '📰', defaultWidth: 1000, defaultHeight: 680, minWidth: 500, minHeight: 400, pinned: false },
 	camera: { id: 'camera', title: 'Camera', icon: '📷', defaultWidth: 800, defaultHeight: 560, minWidth: 500, minHeight: 400, pinned: false },
 	teams: { id: 'teams', title: 'Microsoft Teams', icon: '💬', defaultWidth: 1100, defaultHeight: 720, minWidth: 700, minHeight: 500, pinned: true },
+	slack: { id: 'slack', title: 'Slack', icon: '🟣', defaultWidth: 1100, defaultHeight: 720, minWidth: 700, minHeight: 500, pinned: true },
 };
 
 export const appLoaders: Record<AppID, () => Promise<{ default: Component }>> = {
@@ -110,6 +112,7 @@ export const appLoaders: Record<AppID, () => Promise<{ default: Component }>> = 
 	news: () => import('../components/apps/News.svelte'),
 	camera: () => import('../components/apps/Camera.svelte'),
 	teams: () => import('../components/apps/Teams.svelte'),
+	slack: () => import('../components/apps/Slack.svelte'),
 };
 
 export const pinnedTaskbarApps = Object.values(appConfigs)
