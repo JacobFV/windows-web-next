@@ -78,6 +78,44 @@ function createInitialWindowState(config: AppConfig, index: number): WindowState
 	};
 }
 
+type WinRect = { x: number; y: number; width: number; height: number };
+
+/**
+ * Pick a spawn position overlapping the open windows as little as possible, so
+ * two apps land side-by-side (visible together) instead of cascading into a
+ * pile. Anchored slots (halves → corners → center) scored against open,
+ * non-minimized windows; falls back to the cascade position when none exist.
+ */
+function pickWinSlot(width: number, height: number, existing: WinRect[],
+		fallback: { x: number; y: number }): { x: number; y: number } {
+	if (existing.length === 0) return fallback;
+	const { vw, vh } = winViewport();
+	const left = WIN_MARGIN;
+	const right = Math.max(WIN_MARGIN, vw - WIN_MARGIN - width);
+	const top = WIN_MARGIN;
+	const bottom = Math.max(top, vh - WIN_TASKBAR - height);
+	const midX = Math.round((left + right) / 2);
+	const midY = Math.round((top + bottom) / 2);
+	const cands = [
+		{ x: left, y: top }, { x: right, y: top },
+		{ x: left, y: bottom }, { x: right, y: bottom },
+		{ x: midX, y: top }, { x: midX, y: midY },
+	];
+	const ov = (ax: number, ay: number, w: WinRect) => {
+		const ix = Math.max(0, Math.min(ax + width, w.x + w.width) - Math.max(ax, w.x));
+		const iy = Math.max(0, Math.min(ay + height, w.y + w.height) - Math.max(ay, w.y));
+		return ix * iy;
+	};
+	let best = cands[0], bestScore = Infinity;
+	for (const c of cands) {
+		let score = 0;
+		for (const w of existing) score += ov(c.x, c.y, w);
+		if (score < bestScore) { bestScore = score; best = c; }
+		if (score === 0) break;
+	}
+	return best;
+}
+
 /**
  * Clamp a window so the *whole* frame stays inside the usable rect
  * (viewport minus taskbar + margins). Prevents off-screen spawns and
@@ -227,6 +265,16 @@ class WindowManager {
 			fresh.width = clamped.width;
 			fresh.height = clamped.height;
 			fresh.maximized = clamped.maximized;
+		} else {
+			// Place side-by-side with already-open windows (least overlap).
+			const openRects = this.openApps
+				.filter((o) => o !== id && !this.windowStates[o]?.minimized)
+				.map((o) => this.windowStates[o])
+				.filter(Boolean) as WinRect[];
+			const slot = pickWinSlot(fresh.width, fresh.height, openRects,
+				{ x: fresh.x, y: fresh.y });
+			fresh.x = slot.x;
+			fresh.y = slot.y;
 		}
 		this.windowStates[id] = fresh;
 		this.openApps = [...this.openApps, id];
