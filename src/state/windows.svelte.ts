@@ -46,14 +46,32 @@ export interface DesktopIcon {
 	gridY?: number;
 }
 
-function createInitialWindowState(config: AppConfig, index: number): WindowState {
-	const offsetX = 80 + (index * 40);
-	const offsetY = 60 + (index * 30);
+// Reserved chrome: taskbar ~56px at the bottom, plus a small margin so
+// windows never spawn off-screen or under the taskbar.
+const WIN_TASKBAR = 56;
+const WIN_MARGIN = 8;
+
+function winViewport(): { vw: number; vh: number } {
 	return {
-		x: offsetX,
-		y: offsetY,
-		width: config.defaultWidth,
-		height: config.defaultHeight,
+		vw: typeof window !== 'undefined' ? window.innerWidth : 1440,
+		vh: typeof window !== 'undefined' ? window.innerHeight : 900,
+	};
+}
+
+function createInitialWindowState(config: AppConfig, index: number): WindowState {
+	const { vw, vh } = winViewport();
+	const usableW = vw - WIN_MARGIN * 2;
+	const usableH = vh - WIN_TASKBAR - WIN_MARGIN;
+	const width = Math.min(config.defaultWidth, usableW);
+	const height = Math.min(config.defaultHeight, usableH);
+	// Cascade, but keep the whole window inside the usable rect.
+	const offsetX = Math.min(40 + index * 36, Math.max(WIN_MARGIN, vw - WIN_MARGIN - width));
+	const offsetY = Math.min(32 + index * 28, Math.max(WIN_MARGIN, vh - WIN_TASKBAR - height));
+	return {
+		x: Math.max(WIN_MARGIN, offsetX),
+		y: Math.max(WIN_MARGIN, offsetY),
+		width,
+		height,
 		minimized: false,
 		maximized: false,
 		zIndex: 10 + index,
@@ -61,22 +79,22 @@ function createInitialWindowState(config: AppConfig, index: number): WindowState
 }
 
 /**
- * Clamp a persisted window position+size to the current viewport so a window
- * that was saved on a larger screen still lands somewhere visible.
- * Leaves at least 60px of header on-screen so the user can grab it.
+ * Clamp a window so the *whole* frame stays inside the usable rect
+ * (viewport minus taskbar + margins). Prevents off-screen spawns and
+ * windows sliding under the taskbar.
  */
 function clampWindowState(s: PersistedWindowState, config: AppConfig): PersistedWindowState {
-	const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
-	const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
+	const { vw, vh } = winViewport();
 	const minW = config.minWidth ?? 200;
 	const minH = config.minHeight ?? 150;
-	const width = Math.max(minW, Math.min(s.width, vw));
-	const height = Math.max(minH, Math.min(s.height, vh));
-	// Keep at least 60px visible on each axis for the title bar grip.
-	const maxX = Math.max(0, vw - 60);
-	const maxY = Math.max(0, vh - 60);
-	const x = Math.max(0, Math.min(s.x, maxX));
-	const y = Math.max(0, Math.min(s.y, maxY));
+	const usableW = vw - WIN_MARGIN * 2;
+	const usableH = vh - WIN_TASKBAR - WIN_MARGIN;
+	const width = Math.max(minW, Math.min(s.width, usableW));
+	const height = Math.max(minH, Math.min(s.height, usableH));
+	const maxX = Math.max(WIN_MARGIN, vw - WIN_MARGIN - width);
+	const maxY = Math.max(WIN_MARGIN, vh - WIN_TASKBAR - height);
+	const x = Math.max(WIN_MARGIN, Math.min(s.x, maxX));
+	const y = Math.max(WIN_MARGIN, Math.min(s.y, maxY));
 	return { x, y, width, height, maximized: s.maximized };
 }
 
