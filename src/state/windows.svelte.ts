@@ -85,10 +85,12 @@ type WinRect = { x: number; y: number; width: number; height: number };
  * two apps land side-by-side (visible together) instead of cascading into a
  * pile. Anchored slots (halves → corners → center) scored against open,
  * non-minimized windows; falls back to the cascade position when none exist.
+ * Returns the chosen slot plus its residual overlap area (``score``) so the
+ * caller can decide whether to snap-assist tile instead.
  */
 function pickWinSlot(width: number, height: number, existing: WinRect[],
-		fallback: { x: number; y: number }): { x: number; y: number } {
-	if (existing.length === 0) return fallback;
+		fallback: { x: number; y: number }): { x: number; y: number; score: number } {
+	if (existing.length === 0) return { ...fallback, score: 0 };
 	const { vw, vh } = winViewport();
 	const left = WIN_MARGIN;
 	const right = Math.max(WIN_MARGIN, vw - WIN_MARGIN - width);
@@ -113,7 +115,7 @@ function pickWinSlot(width: number, height: number, existing: WinRect[],
 		if (score < bestScore) { bestScore = score; best = c; }
 		if (score === 0) break;
 	}
-	return best;
+	return { x: best.x, y: best.y, score: bestScore };
 }
 
 /**
@@ -267,14 +269,24 @@ class WindowManager {
 			fresh.maximized = clamped.maximized;
 		} else {
 			// Place side-by-side with already-open windows (least overlap).
-			const openRects = this.openApps
-				.filter((o) => o !== id && !this.windowStates[o]?.minimized)
+			const openIds = this.openApps.filter(
+				(o) => o !== id && !this.windowStates[o]?.minimized && !this.windowStates[o]?.maximized,
+			);
+			const openRects = openIds
 				.map((o) => this.windowStates[o])
 				.filter(Boolean) as WinRect[];
 			const slot = pickWinSlot(fresh.width, fresh.height, openRects,
 				{ x: fresh.x, y: fresh.y });
-			fresh.x = slot.x;
-			fresh.y = slot.y;
+			const area = fresh.width * fresh.height;
+			// Snap-assist: when exactly one other top window is open and the new
+			// window is too wide to sit beside it without major overlap (>25% of
+			// its own area), tile both into left/right halves instead of piling.
+			if (openIds.length === 1 && area > 0 && slot.score / area > 0.25) {
+				this.tileSideBySide(openIds[0], id, fresh);
+			} else {
+				fresh.x = slot.x;
+				fresh.y = slot.y;
+			}
 		}
 		this.windowStates[id] = fresh;
 		this.openApps = [...this.openApps, id];
@@ -346,6 +358,35 @@ class WindowManager {
 		if (!this.windowStates[id]) return;
 		this.windowStates[id].maximized = !this.windowStates[id].maximized;
 		this.recordWindowState(id);
+	}
+
+	/**
+	 * Snap-assist tile: put an already-open window on the left half and a
+	 * freshly-created (not-yet-registered) window on the right half, so two
+	 * wide apps render visibly side-by-side instead of overlapping. The left
+	 * window is resized in place; the right window's geometry is written onto
+	 * its pending state object (registered by the caller right after).
+	 */
+	private tileSideBySide(leftId: AppID, rightId: AppID, rightFresh: WindowState) {
+		const { vw, vh } = winViewport();
+		const usableW = vw - WIN_MARGIN * 2;
+		const usableH = vh - WIN_TASKBAR - WIN_MARGIN;
+		const gap = WIN_MARGIN;
+		const halfW = Math.floor((usableW - gap) / 2);
+		const leftX = WIN_MARGIN;
+		const rightX = WIN_MARGIN + halfW + gap;
+		const top = WIN_MARGIN;
+		const left = this.windowStates[leftId];
+		if (left) {
+			if (left.maximized) left.maximized = false;
+			this.updatePosition(leftId, leftX, top);
+			this.updateSize(leftId, halfW, usableH);
+		}
+		rightFresh.maximized = false;
+		rightFresh.x = rightX;
+		rightFresh.y = top;
+		rightFresh.width = Math.max(halfW, appConfigs[rightId].minWidth ?? 200);
+		rightFresh.height = usableH;
 	}
 
 	updatePosition(id: AppID, x: number, y: number) {
